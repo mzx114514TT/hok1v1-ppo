@@ -237,14 +237,87 @@ class EpisodeRunner:
                                 reward=observation[str(i)]["reward"]["reward_sum"],
                             )
 
-                    now = time.time()
-                    if now - self.last_report_monitor_time >= 60:
-                        monitor_data = {"episode_cnt": self.episode_cnt}
-                        if self.monitor:
-                            if is_eval:
-                                monitor_data["reward"] = round(reward_sum_list[monitor_side], 2)
-                            self.monitor.put_data({os.getpid(): monitor_data})
-                            self.last_report_monitor_time = now
+                    # 每局上报完整指标(对局级数据每局必报,无时间门控)
+                    reward_manager = self.agents[monitor_side].reward_manager
+                    episode_stats = reward_manager.get_episode_stats() if reward_manager else {}
+
+                    # 从最后一帧提取终局状态
+                    frame_state = observation[str(monitor_side)]["frame_state"]
+                    hero_states = frame_state.get("hero_states", [])
+
+                    main_camp = reward_manager.main_hero_camp if reward_manager else -1
+                    main_hero_obs = None
+                    enemy_hero_obs = None
+                    for h in hero_states:
+                        if h["camp"] == main_camp:
+                            main_hero_obs = h
+                        else:
+                            enemy_hero_obs = h
+
+                    hero_config_id = main_hero_obs.get("config_id", 0) if main_hero_obs else 0
+
+                    monitor_data = {
+                        "episode_cnt": self.episode_cnt,
+                        "lineup": f"{lineup[0]}_{lineup[1]}",
+                        "hero_config_id": hero_config_id,
+                        "frame_no": frame_no,
+                        "reward": round(reward_sum_list[monitor_side], 2),
+                    }
+
+                    if main_hero_obs:
+                        monitor_data["kill_count"] = main_hero_obs.get("kill_count", 0)
+                        monitor_data["dead_count"] = main_hero_obs.get("dead_count", 0)
+                        monitor_data["hurt_to_hero"] = main_hero_obs.get("total_hurt_to_hero", 0)
+                        monitor_data["hurt_to_tower"] = main_hero_obs.get("total_hurt_to_tower", 0)
+                        monitor_data["main_money"] = main_hero_obs.get("money", 0)
+                        monitor_data["main_level"] = main_hero_obs.get("level", 1)
+
+                    if enemy_hero_obs:
+                        monitor_data["enemy_money"] = enemy_hero_obs.get("money", 0)
+                        monitor_data["enemy_level"] = enemy_hero_obs.get("level", 1)
+
+                    monitor_data["money_diff"] = (
+                        monitor_data.get("main_money", 0) - monitor_data.get("enemy_money", 0)
+                    )
+
+                    # 双方塔终局血量
+                    main_tower_hp = 0.0
+                    enemy_tower_hp = 0.0
+                    for npc in frame_state.get("npc_states", []):
+                        if npc.get("sub_type") == 21:
+                            rate = npc.get("hp", 0) / max(npc.get("max_hp", 1), 1)
+                            if npc["camp"] == main_camp:
+                                main_tower_hp = round(rate, 3)
+                            else:
+                                enemy_tower_hp = round(rate, 3)
+
+                    monitor_data["main_tower_hp"] = main_tower_hp
+                    monitor_data["enemy_tower_hp"] = enemy_tower_hp
+                    monitor_data["tower_hp_diff"] = round(main_tower_hp - enemy_tower_hp, 3)
+
+                    # 局内推断指标
+                    monitor_data.update(episode_stats)
+
+                    # 技能使用按英雄 ID 拆分(112/133 各一张图)
+                    other_hid = 133 if hero_config_id == 112 else 112
+                    for i in range(3):
+                        val = episode_stats.get(f"skill_{i}_usage", 0)
+                        monitor_data[f"skill_{i}_usage_{hero_config_id}"] = val
+                        monitor_data[f"skill_{i}_usage_{other_hid}"] = 0
+
+                    # 生存与发育监控字段
+                    monitor_data["heal_efficiency"] = round(episode_stats.get("heal_efficiency", 0), 3)
+                    monitor_data["flash_efficiency"] = round(episode_stats.get("flash_efficiency", 0), 3)
+                    monitor_data["tower_dive_count"] = episode_stats.get("tower_dive_count", 0)
+                    monitor_data["tower_dive_death"] = episode_stats.get("tower_dive_death", 0)
+                    monitor_data["idle_ratio"] = round(episode_stats.get("idle_ratio", 0), 3)
+                    # 行为质量监控字段
+                    monitor_data["dirj_skill2_hit_ratio"] = round(episode_stats.get("dirj_skill2_hit_ratio", 0), 3)
+                    monitor_data["dirj_skill2_use_count"] = episode_stats.get("dirj_skill2_use_count", 0)
+                    monitor_data["lane_arrival_frame"] = episode_stats.get("lane_arrival_frame", 0)
+
+                    if self.monitor:
+                        self.monitor.put_data({os.getpid(): monitor_data})
 
                     # Sample process
                     # 进行样本处理，准备训练

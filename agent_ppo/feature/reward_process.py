@@ -5,461 +5,550 @@
 ###########################################################################
 """
 Author: Tencent AI Arena Authors
+
+22 项奖励系统 — 从齐梓桐模型移植
+  基础 12 项:death_penalty / hp_diff / last_hit / money_diff / exp_diff /
+             level_diff / hurt_to_hero / hurt_to_tower / tower_hp_diff /
+             kill_hero / destroy_tower / forward
+  生存发育 7 项:minion_attack / monster_attack / heal_smart / flash_smart /
+               tower_dive_penalty / retreat_smart / idle_penalty
+  英雄特化 5 项:luban_skill_0_clear / dirj_skill_2_hit /
+               dirj_skill_2_miss / lane_arrival / early_aggression_penalty
 """
 
-
 import math
-from agent_ppo.conf.conf import GameConfig
+from agent_ppo.conf.conf import (
+    GameConfig,
+    MINION_MAX_HP_RANGE,
+    MONSTER_MAX_HP_THRESHOLD,
+    TOWER_ATTACK_RANGE,
+    FLASH_DISTANCE_THRESHOLD,
+)
+
+REWARD_CLIP_MIN = -5.0
+REWARD_CLIP_MAX = 5.0
 
 
-SOLDIER_SUB_TYPES = (24, 25, 26, 27)  # MELEE, RANGED, CANNON, SUPER
-
-# Pushing past the midline (forward_ratio > 0.5) without ally minion cover is
-# risky on 墨家机关道; modulate the forward reward by ally proximity.
-FORWARD_COVER_RANGE = 4000.0
-FORWARD_NO_COVER_MULT = 0.4
-FORWARD_FULL_COVER_MULT = 1.0
-
-# Tower diving risk: continuous range + ally minion cover
-TOWER_RANGE = 7000.0
-TOWER_COVER_RANGE = 4000.0  # ally minions within this dist of tower → cover
-TOWER_COVER_MIN = 0.3       # risk multiplier floor when ally minions are right at tower
-
-# Skill combo: reward Skill→NormalAttack transitions
-COMBO_RANGE = 6000.0        # must be within this dist of enemy for combo to count
-COMBO_PER_SKILL = 0.3       # reward per skill cast in combat range
-
-
-# Used to record various reward information
-# 用于记录各个奖励信息
-class RewardStruct:
-    def __init__(self, m_weight=0.0):
-        self.cur_frame_value = 0.0
-        self.last_frame_value = 0.0
-        self.value = 0.0
-        self.weight = m_weight
-        self.min_value = -1
-        self.is_first_arrive_center = True
-
-
-# Used to initialize various reward information
-# 用于初始化各个奖励信息
-def init_calc_frame_map():
-    calc_frame_map = {}
-    for key, weight in GameConfig.REWARD_WEIGHT_DICT.items():
-        calc_frame_map[key] = RewardStruct(weight)
-    return calc_frame_map
+def _clip(value, lo=REWARD_CLIP_MIN, hi=REWARD_CLIP_MAX):
+    return max(lo, min(hi, value))
 
 
 class GameRewardManager:
     def __init__(self, main_hero_runtime_id):
         self.main_hero_player_id = main_hero_runtime_id
         self.main_hero_camp = -1
-        self.main_hero_hp = -1
-        self.main_hero_organ_hp = -1
-        self.m_reward_value = {}
-        self.m_last_frame_no = -1
-        self.m_cur_calc_frame_map = init_calc_frame_map()
-        self.m_main_calc_frame_map = init_calc_frame_map()
-        self.m_enemy_calc_frame_map = init_calc_frame_map()
-        self.m_init_calc_frame_map = {}
+        self.weights = GameConfig.REWARD_WEIGHT_DICT
         self.time_scale_arg = GameConfig.TIME_SCALE_ARG
-        self.m_main_hero_config_id = -1
-        self.m_each_level_max_exp = {}
-        self._last_main_hero_pos = None
-        self._last_main_hp = None
-        self._last_main_hp_rate = None
-        self._last_enemy_hp_rate = None
-        self._trade_accumulator = 0.0
-        self._last_skill_cds = {}
-        self._combo_accumulator = 0.0
 
-    # Used to initialize the maximum experience value for each agent level
-    # 用于初始化智能体各个等级的最大经验值
-    def init_max_exp_of_each_hero(self):
-        self.m_each_level_max_exp.clear()
-        self.m_each_level_max_exp[1] = 160
-        self.m_each_level_max_exp[2] = 298
-        self.m_each_level_max_exp[3] = 446
-        self.m_each_level_max_exp[4] = 524
-        self.m_each_level_max_exp[5] = 613
-        self.m_each_level_max_exp[6] = 713
-        self.m_each_level_max_exp[7] = 825
-        self.m_each_level_max_exp[8] = 950
-        self.m_each_level_max_exp[9] = 1088
-        self.m_each_level_max_exp[10] = 1240
-        self.m_each_level_max_exp[11] = 1406
-        self.m_each_level_max_exp[12] = 1585
-        self.m_each_level_max_exp[13] = 1778
-        self.m_each_level_max_exp[14] = 1984
+        self.prev = {}
+        self.first_frame = True
 
-    def result(self, frame_data):
-        self.init_max_exp_of_each_hero()
-        self.frame_data_process(frame_data)
-        self.get_reward(frame_data, self.m_reward_value)
+        # 局内统计器
+        self.death_by_hero = 0
+        self.death_by_tower = 0
+        self.skill_usage = [0, 0, 0]
+        self.summoner_usage = 0
+        self.minion_kills = 0
+        self.monster_kills = 0
+        self.last_hit_count = 0
+        self.forward_acc = 0.0
+        self.forward_count = 0
+        self.destroy_tower_flag = 0
+        self.last_frame_no = 0
 
-        frame_no = frame_data["frame_no"]
-        if self.time_scale_arg > 0:
-            for key in self.m_reward_value:
-                self.m_reward_value[key] *= math.pow(0.6, 1.0 * frame_no / self.time_scale_arg)
+        # 帧差分推断状态
+        self.prev_skill_cd = []
+        self.prev_summoner_cd = 0
+        self.prev_npcs = {}
+        self.alive = True
 
-        return self.m_reward_value
+        # 批次2:生存与发育跟踪
+        self.prev_hp_rate = None
+        self.prev_enemy_hp_rate = None
+        self.prev_pos = None
+        self.prev_enemy_pos = None
+        self.heal_count = 0
+        self.heal_smart_count = 0
+        self.flash_count = 0
+        self.flash_smart_count = 0
+        self.tower_dive_count = 0
+        self.tower_dive_death = 0
+        self.idle_frames = 0
+        self.frames_since_action = 0
+        self.prev_last_hit_count = 0
 
-    # Calculate the value of each reward item in each frame
-    # 计算每帧的每个奖励子项的信息
-    def set_cur_calc_frame_vec(self, cul_calc_frame_map, frame_data, camp):
+        # 批次3:英雄特定技能追踪
+        self.hero_config_id = 0
+        self.skill2_check_window = 0
+        self.skill2_ref_hp = 0.0
+        self.dirj_skill2_use_count = 0
+        self.dirj_skill2_hit_count = 0
+        self.lane_arrival_done = False
+        self.lane_arrival_frame = 0
 
-        # Get both agents
-        # 获取双方智能体
-        main_hero = None
-        enemy_hero = None
-        hero_list = frame_data["hero_states"]
-        for hero in hero_list:
-            hero_camp = hero["camp"]
-            if hero_camp == camp:
-                main_hero = hero
-            else:
-                enemy_hero = hero
+    def _hero_by_camp(self, frame_data, camp):
+        for h in frame_data["hero_states"]:
+            if h["camp"] == camp:
+                return h
+        return None
 
-        # Get both defense towers
-        # 获取双方防御塔
-        main_tower, enemy_tower = None, None
-        npc_list = frame_data["npc_states"]
-        for organ in npc_list:
-            organ_camp = organ["camp"]
-            organ_subtype = organ["sub_type"]
-            if organ_camp == camp:
-                if organ_subtype == 21:
-                    main_tower = organ
-            else:
-                if organ_subtype == 21:
-                    enemy_tower = organ
-
-        for reward_name, reward_struct in cul_calc_frame_map.items():
-            reward_struct.last_frame_value = reward_struct.cur_frame_value
-            # Tower health points
-            # 塔血量
-            if reward_name == "tower_hp_point":
-                if main_tower and enemy_tower:
-                    reward_struct.cur_frame_value = (
-                        1.0 * main_tower["hp"] / max(main_tower["max_hp"], 1)
-                        - 1.0 * enemy_tower["hp"] / max(enemy_tower["max_hp"], 1)
-                    )
-                else:
-                    reward_struct.cur_frame_value = 0.0
-            # Own tower absolute HP rate
-            # 己方防御塔血量（非零和）
-            elif reward_name == "own_tower_hp_point":
-                if main_tower:
-                    reward_struct.cur_frame_value = 1.0 * main_tower["hp"] / max(main_tower["max_hp"], 1)
-                else:
-                    reward_struct.cur_frame_value = 0.0
-            # Hero health points
-            # 英雄血量
-            elif reward_name == "hp_point":
-                if main_hero and enemy_hero:
-                    reward_struct.cur_frame_value = (
-                        1.0 * main_hero["hp"] / max(main_hero["max_hp"], 1)
-                        - 1.0 * enemy_hero["hp"] / max(enemy_hero["max_hp"], 1)
-                    )
-                else:
-                    reward_struct.cur_frame_value = 0.0
-            # Kill count
-            # 击杀数
-            elif reward_name == "kill":
-                reward_struct.cur_frame_value = main_hero.get("kill_count", 0) if main_hero else 0
-            # Death count
-            # 死亡数
-            elif reward_name == "death":
-                reward_struct.cur_frame_value = main_hero.get("dead_count", 0) if main_hero else 0
-            # Money
-            # 经济
-            elif reward_name == "money":
-                if main_hero and enemy_hero:
-                    reward_struct.cur_frame_value = (
-                        main_hero["money"] - enemy_hero["money"]
-                    ) / 5000.0
-                else:
-                    reward_struct.cur_frame_value = 0.0
-            # Experience
-            # 经验
-            elif reward_name == "exp":
-                if main_hero and enemy_hero:
-                    reward_struct.cur_frame_value = (
-                        self._calc_exp_progress(main_hero)
-                        - self._calc_exp_progress(enemy_hero)
-                    )
-                else:
-                    reward_struct.cur_frame_value = 0.0
-            # Last hit
-            # 补刀数
-            elif reward_name == "last_hit":
-                reward_struct.cur_frame_value = main_hero.get("last_hit", 0) if main_hero else 0
-            # Low HP penalty (continuous gradient with recovery detection)
-            # 低血量惩罚（连续梯度 + 恢复检测）
-            elif reward_name == "low_hp_penalty":
-                if main_hero:
-                    hp_ratio = main_hero["hp"] / max(main_hero["max_hp"], 1)
-                    if hp_ratio >= 0.4:
-                        reward_struct.cur_frame_value = 0.0
-                    elif hp_ratio >= 0.25:
-                        # Linear gradient 0→0.6 across 0.25–0.4
-                        reward_struct.cur_frame_value = (0.4 - hp_ratio) / 0.15 * 0.6
-                    else:
-                        # Critical: check if HP is recovering (recalling/healing)
-                        if self._last_main_hp is not None and main_hero["hp"] > self._last_main_hp + 5:
-                            reward_struct.cur_frame_value = 0.3
-                        else:
-                            reward_struct.cur_frame_value = 1.0
-                else:
-                    reward_struct.cur_frame_value = 0.0
-            # Under tower risk penalty (continuous + minion-cover exemption)
-            # 越塔风险惩罚（连续化 + 兵线抗塔豁免）
-            elif reward_name == "under_tower_risk":
-                if camp == self.main_hero_camp and main_hero and enemy_tower:
-                    hero_pos = (main_hero["location"]["x"], main_hero["location"]["z"])
-                    tower_pos = (enemy_tower["location"]["x"], enemy_tower["location"]["z"])
-                    dist = math.dist(hero_pos, tower_pos)
-                    tower_risk = max(0.0, 1.0 - dist / TOWER_RANGE)
-                    hp_ratio = main_hero["hp"] / max(main_hero["max_hp"], 1)
-                    hp_risk = max(0.0, 1.0 - hp_ratio / 0.5)
-                    # Ally minions near tower reduce risk (they tank tower shots)
-                    ally_cover = self._ally_near_enemy_tower(enemy_tower, frame_data)
-                    cover_mult = TOWER_COVER_MIN + (1.0 - TOWER_COVER_MIN) * (1.0 - ally_cover)
-                    reward_struct.cur_frame_value = tower_risk * hp_risk * cover_mult
-                else:
-                    reward_struct.cur_frame_value = 0.0
-            # Forward
-            # 前进
-            elif reward_name == "forward":
-                reward_struct.cur_frame_value = self.calculate_forward(main_hero, main_tower, enemy_tower, frame_data)
-            # Kiting: reward moving while near enemy (encourages stutter-step)
-            # 走A奖励：靠近敌人同时保持移动
-            elif reward_name == "kiting":
-                if main_hero and enemy_hero and main_hero.get("hp", 0) > 0:
-                    cur_pos = (main_hero["location"]["x"], main_hero["location"]["z"])
-                    enemy_pos = (enemy_hero["location"]["x"], enemy_hero["location"]["z"])
-                    dist = math.sqrt((cur_pos[0]-enemy_pos[0])**2 + (cur_pos[1]-enemy_pos[1])**2)
-                    near_enemy = max(0.0, 1.0 - dist / 6000.0)
-
-                    moved = 0.0
-                    if self._last_main_hero_pos is not None:
-                        dx = cur_pos[0] - self._last_main_hero_pos[0]
-                        dz = cur_pos[1] - self._last_main_hero_pos[1]
-                        move_dist = math.sqrt(dx*dx + dz*dz)
-                        moved = min(move_dist / 300.0, 1.0)
-
-                    reward_struct.cur_frame_value = near_enemy * moved
-                else:
-                    reward_struct.cur_frame_value = 0.0
-            # Trade / skill-hit: reward favorable HP exchanges
-            # 换血/技能命中奖励：成功换血时给予正反馈
-            elif reward_name == "trade":
-                if camp == self.main_hero_camp and main_hero and enemy_hero and self._last_main_hp_rate is not None:
-                    cur_main_rate = main_hero["hp"] / max(main_hero["max_hp"], 1)
-                    cur_enemy_rate = enemy_hero["hp"] / max(enemy_hero["max_hp"], 1)
-                    main_delta = cur_main_rate - self._last_main_hp_rate
-                    enemy_delta = cur_enemy_rate - self._last_enemy_hp_rate
-                    max_delta = max(abs(main_delta), abs(enemy_delta))
-                    if max_delta > 0.02:
-                        hero_pos = (main_hero["location"]["x"], main_hero["location"]["z"])
-                        enemy_pos = (enemy_hero["location"]["x"], enemy_hero["location"]["z"])
-                        dist = math.dist(hero_pos, enemy_pos)
-                        if dist < 8000:
-                            trade_raw = main_delta - enemy_delta
-                            trade_raw = max(-1.0, min(1.0, trade_raw))
-                            self._trade_accumulator += trade_raw
-                reward_struct.cur_frame_value = self._trade_accumulator
-            # Skill combo: reward using skills in combat range (enables Skill→NormalAttack)
-            # 技能连招奖励：战斗中释放技能时给予奖励（鼓励技能→普攻连招）
-            elif reward_name == "combo":
-                if camp == self.main_hero_camp and main_hero and enemy_hero:
-                    casts = 0
-                    for slot in main_hero.get("skill_slot_list", []):
-                        idx = slot["slot_index"]
-                        cd = slot["cool_down"]
-                        prev_cd = self._last_skill_cds.get(idx, 0)
-                        # Skill went on cooldown this frame (was cast)
-                        if cd > prev_cd + 0.1:
-                            casts += 1
-                    if casts > 0:
-                        hero_pos = (main_hero["location"]["x"], main_hero["location"]["z"])
-                        enemy_pos = (enemy_hero["location"]["x"], enemy_hero["location"]["z"])
-                        dist = math.dist(hero_pos, enemy_pos)
-                        if dist < COMBO_RANGE:
-                            self._combo_accumulator += COMBO_PER_SKILL * casts
-                reward_struct.cur_frame_value = self._combo_accumulator
-
-    # Calculate the forward reward based on the distance between the agent and both defensive towers
-    # 用智能体到双方防御塔的距离，计算前进奖励
-    def calculate_forward(self, main_hero, main_tower, enemy_tower, frame_data):
-        if not main_hero or not main_tower or not enemy_tower:
-            return 0.0
-        main_tower_pos = (main_tower["location"]["x"], main_tower["location"]["z"])
-        enemy_tower_pos = (enemy_tower["location"]["x"], enemy_tower["location"]["z"])
-        hero_pos = (
-            main_hero["location"]["x"],
-            main_hero["location"]["z"],
-        )
-        total_dist = math.dist(main_tower_pos, enemy_tower_pos)
-        if total_dist == 0:
-            return 0.0
-        dist_to_main = math.dist(hero_pos, main_tower_pos)
-        # Forward ratio: 0 = at own tower, 1 = at enemy tower
-        # 前进比例：0=在己方塔下，1=在敌方塔下
-        forward_ratio = dist_to_main / total_dist
-        # Adjust by HP: lower HP reduces forward incentive
-        # 根据血量调整：血量低时减少前压奖励
-        hp_ratio = main_hero["hp"] / max(main_hero["max_hp"], 1)
-        safe_forward = forward_ratio * min(hp_ratio + 0.3, 1.0)
-
-        # Past midline: scale by ally minion cover
-        # 过中线：按友方小兵掩护程度打折
-        if forward_ratio > 0.5:
-            ally_cover = self._ally_minion_cover(hero_pos, main_hero["camp"], frame_data)
-            cover_mult = FORWARD_NO_COVER_MULT + (
-                FORWARD_FULL_COVER_MULT - FORWARD_NO_COVER_MULT
-            ) * ally_cover
-            safe_forward *= cover_mult
-        return safe_forward
-
-    # Return [0,1] indicating ally minion proximity around the hero.
-    # 0 = no ally minions, 1 = ally minion right next to hero.
-    def _ally_minion_cover(self, hero_pos, main_camp, frame_data):
-        closest = float("inf")
-        for npc in frame_data.get("npc_states", []):
-            if npc.get("sub_type") not in SOLDIER_SUB_TYPES:
-                continue
-            if npc.get("camp") != main_camp:
-                continue
-            npc_pos = (npc["location"]["x"], npc["location"]["z"])
-            d = math.dist(hero_pos, npc_pos)
-            if d < closest:
-                closest = d
-        if closest == float("inf"):
-            return 0.0
-        return max(0.0, 1.0 - closest / FORWARD_COVER_RANGE)
-
-    # Return [0,1] indicating ally minion proximity around enemy tower.
-    # 0 = no ally minions near tower, 1 = ally minion right next to tower.
-    def _ally_near_enemy_tower(self, enemy_tower, frame_data):
-        tower_pos = (enemy_tower["location"]["x"], enemy_tower["location"]["z"])
-        closest = float("inf")
-        for npc in frame_data.get("npc_states", []):
-            if npc.get("sub_type") not in SOLDIER_SUB_TYPES:
-                continue
-            if npc.get("camp") != self.main_hero_camp:
-                continue
-            npc_pos = (npc["location"]["x"], npc["location"]["z"])
-            d = math.dist(tower_pos, npc_pos)
-            if d < closest:
-                closest = d
-        if closest == float("inf"):
-            return 0.0
-        return max(0.0, 1.0 - closest / TOWER_COVER_RANGE)
-
-    # Calculate experience progress for a hero
-    # 计算英雄的经验进度
-    def _calc_exp_progress(self, hero):
-        if not hero:
-            return 0.0
-        level = hero.get("level", 1)
-        exp = hero.get("exp", 0)
-        max_exp = self.m_each_level_max_exp.get(level, 2000)
-        return level + exp / max_exp
-
-    # Calculate the reward item information for both sides using frame data
-    # 用帧数据来计算两边的奖励子项信息
-    def frame_data_process(self, frame_data):
-        main_camp, enemy_camp = -1, -1
-
-        for hero in frame_data["hero_states"]:
-            if hero["runtime_id"] == self.main_hero_player_id:
-                main_camp = hero["camp"]
+    def _find_camps(self, frame_data):
+        main_camp, enemy_camp = None, None
+        for h in frame_data["hero_states"]:
+            if h["runtime_id"] == self.main_hero_player_id:
+                main_camp = h["camp"]
                 self.main_hero_camp = main_camp
             else:
-                enemy_camp = hero["camp"]
-        self.set_cur_calc_frame_vec(self.m_main_calc_frame_map, frame_data, main_camp)
-        self.set_cur_calc_frame_vec(self.m_enemy_calc_frame_map, frame_data, enemy_camp)
+                enemy_camp = h["camp"]
+        return main_camp, enemy_camp
 
-        # Track main hero position for kiting reward
-        # 记录己方英雄位置，用于走A奖励
-        for hero in frame_data["hero_states"]:
-            if hero["runtime_id"] == self.main_hero_player_id:
-                self._last_main_hero_pos = (hero["location"]["x"], hero["location"]["z"])
-                self._last_main_hp = hero["hp"]
-                self._last_main_hp_rate = hero["hp"] / max(hero["max_hp"], 1)
-                self._last_skill_cds.clear()
-                for slot in hero.get("skill_slot_list", []):
-                    self._last_skill_cds[slot["slot_index"]] = slot["cool_down"]
-            else:
-                self._last_enemy_hp_rate = hero["hp"] / max(hero["max_hp"], 1)
+    def _tower_hp_rate(self, frame_data, camp):
+        for npc in frame_data["npc_states"]:
+            if npc.get("sub_type") == 21 and npc["camp"] == camp:
+                max_hp = max(npc.get("max_hp", 1), 1)
+                return npc.get("hp", 0) / max_hp
+        return 0.0
 
-    # Get game phase weight multiplier based on hero level
-    # 根据英雄等级获取游戏阶段权重倍数
-    def _get_phase_weights(self, level):
-        if level <= 4:
-            # Early game: encourage leaving fountain + L2/L4 power-spike racing
-            return {
-                "money": 3.0, "exp": 5.0, "kill": 0.5,
-                "forward": 1.5, "tower_hp_point": 0.8, "last_hit": 1.5,
-                "combo": 0.3,
-            }
-        elif level <= 8:
-            return {
-                "money": 1.0, "exp": 1.0, "kill": 1.5,
-                "forward": 1.0, "tower_hp_point": 1.2, "last_hit": 1.0,
-                "combo": 1.0,
-            }
-        else:
-            return {
-                "money": 0.8, "exp": 0.5, "kill": 1.2,
-                "forward": 1.5, "tower_hp_point": 1.5, "last_hit": 0.8,
-                "combo": 1.2,
-            }
-
-    # Use the values obtained in each frame to calculate the corresponding reward value
-    # 用每一帧得到的奖励子项信息来计算对应的奖励值
-    def get_reward(self, frame_data, reward_dict):
-        # Get main hero level for phase-based weighting
-        # 获取主英雄等级用于阶段权重
-        main_hero_level = 1
-        for hero in frame_data["hero_states"]:
-            if hero["runtime_id"] == self.main_hero_player_id:
-                main_hero_level = hero.get("level", 1)
-                break
-        phase_weights = self._get_phase_weights(main_hero_level)
-
-        reward_dict.clear()
-        reward_sum, weight_sum = 0.0, 0.0
-        for reward_name, reward_struct in self.m_cur_calc_frame_map.items():
-            if reward_name in ["kill", "death", "last_hit"]:
-                # Non-zero-sum rewards: use main camp delta directly
-                # 非零和奖励：直接使用己方变化量
-                main_cur = self.m_main_calc_frame_map[reward_name].cur_frame_value
-                main_last = self.m_main_calc_frame_map[reward_name].last_frame_value
-                delta = main_cur - main_last
-                if reward_name in ["death", "low_hp_penalty", "under_tower_risk"]:
-                    reward_struct.value = -delta
+    def _forward_value(self, main_hero, frame_data, main_camp):
+        if main_hero is None:
+            return 0.0
+        hp_rate = main_hero.get("hp", 0) / max(main_hero.get("max_hp", 1), 1)
+        if hp_rate < 0.5:
+            return 0.0
+        my_tower, enemy_tower = None, None
+        for npc in frame_data["npc_states"]:
+            if npc.get("sub_type") == 21:
+                if npc["camp"] == main_camp:
+                    my_tower = npc
                 else:
-                    reward_struct.value = delta
-            else:
-                # Calculate zero-sum reward
-                # 计算零和奖励
-                reward_struct.cur_frame_value = (
-                    self.m_main_calc_frame_map[reward_name].cur_frame_value
-                    - self.m_enemy_calc_frame_map[reward_name].cur_frame_value
-                )
-                reward_struct.last_frame_value = (
-                    self.m_main_calc_frame_map[reward_name].last_frame_value
-                    - self.m_enemy_calc_frame_map[reward_name].last_frame_value
-                )
-                reward_struct.value = reward_struct.cur_frame_value - reward_struct.last_frame_value
+                    enemy_tower = npc
+        if my_tower is None or enemy_tower is None:
+            return 0.0
+        hero_pos = (main_hero["location"]["x"], main_hero["location"]["z"])
+        my_pos = (my_tower["location"]["x"], my_tower["location"]["z"])
+        en_pos = (enemy_tower["location"]["x"], enemy_tower["location"]["z"])
+        dist_hero_enemy = math.dist(hero_pos, en_pos)
+        dist_my_enemy = math.dist(my_pos, en_pos)
+        if dist_hero_enemy > dist_my_enemy:
+            return 0.0
+        return (dist_my_enemy - dist_hero_enemy) / max(dist_my_enemy, 1)
 
-            # Apply phase-based dynamic weighting
-            # 应用基于游戏阶段的动态权重
-            effective_weight = reward_struct.weight * phase_weights.get(reward_name, 1.0)
-            weight_sum += effective_weight
-            reward_sum += reward_struct.value * effective_weight
-            reward_dict[reward_name] = reward_struct.value
+    def result(self, frame_data):
+        main_camp, enemy_camp = self._find_camps(frame_data)
+        main_hero = self._hero_by_camp(frame_data, main_camp)
+        enemy_hero = self._hero_by_camp(frame_data, enemy_camp)
+
+        cur = {}
+        cur["main_hp_rate"] = main_hero.get("hp", 0) / max(main_hero.get("max_hp", 1), 1) if main_hero else 0.0
+        cur["enemy_hp_rate"] = enemy_hero.get("hp", 0) / max(enemy_hero.get("max_hp", 1), 1) if enemy_hero else 0.0
+        cur["main_money"] = main_hero.get("money", 0) if main_hero else 0
+        cur["enemy_money"] = enemy_hero.get("money", 0) if enemy_hero else 0
+        cur["main_exp"] = main_hero.get("exp", 0) if main_hero else 0
+        cur["enemy_exp"] = enemy_hero.get("exp", 0) if enemy_hero else 0
+        cur["main_level"] = main_hero.get("level", 1) if main_hero else 1
+        cur["enemy_level"] = enemy_hero.get("level", 1) if enemy_hero else 1
+        cur["main_hurt_to_hero"] = main_hero.get("total_hurt_to_hero", 0) if main_hero else 0
+        cur["main_hurt_to_tower"] = main_hero.get("total_hurt_to_tower", 0) if main_hero else 0
+        cur["main_kill"] = main_hero.get("kill_count", 0) if main_hero else 0
+        cur["main_dead"] = main_hero.get("dead_count", 0) if main_hero else 0
+        cur["main_tower_hp"] = self._tower_hp_rate(frame_data, main_camp) if main_camp else 0.0
+        cur["enemy_tower_hp"] = self._tower_hp_rate(frame_data, enemy_camp) if enemy_camp else 0.0
+
+        if self.first_frame:
+            self.prev = cur.copy()
+            self.first_frame = False
+            if main_hero:
+                self.prev_hp_rate = cur["main_hp_rate"]
+                self.prev_enemy_hp_rate = cur["enemy_hp_rate"]
+                loc = main_hero.get("location", {})
+                self.prev_pos = (loc.get("x", 0), loc.get("z", 0))
+            return {"reward_sum": 0.0}
+
+        reward_dict = {}
+        w = self.weights
+
+        # ── 基础 12 项 ───────────────────────────────────────
+        d_main_dead = cur["main_dead"] - self.prev["main_dead"]
+        reward_dict["death_penalty"] = _clip(-1.0 * d_main_dead) * w.get("death_penalty", 0)
+
+        d_hp = (cur["main_hp_rate"] - self.prev["main_hp_rate"]) - (cur["enemy_hp_rate"] - self.prev["enemy_hp_rate"])
+        reward_dict["hp_diff"] = _clip(d_hp) * w.get("hp_diff", 0)
+
+        d_kill = cur["main_kill"] - self.prev["main_kill"]
+        reward_dict["last_hit"] = 0.0  # 占位,NPC 推断后更新
+
+        d_money = (cur["main_money"] - self.prev["main_money"]) - (cur["enemy_money"] - self.prev["enemy_money"])
+        reward_dict["money_diff"] = _clip(d_money / 1000.0) * w.get("money_diff", 0)
+
+        d_exp = (cur["main_exp"] - self.prev["main_exp"]) - (cur["enemy_exp"] - self.prev["enemy_exp"])
+        reward_dict["exp_diff"] = _clip(d_exp / 1000.0) * w.get("exp_diff", 0)
+
+        d_level = (cur["main_level"] - cur["enemy_level"])
+        reward_dict["level_diff"] = _clip(d_level) * w.get("level_diff", 0)
+
+        d_hurt_hero = cur["main_hurt_to_hero"] - self.prev["main_hurt_to_hero"]
+        enemy_max_hp = max(enemy_hero.get("max_hp", 1), 1) if enemy_hero else 1
+        reward_dict["hurt_to_hero"] = _clip(d_hurt_hero / enemy_max_hp) * w.get("hurt_to_hero", 0)
+
+        d_hurt_tower = cur["main_hurt_to_tower"] - self.prev["main_hurt_to_tower"]
+        reward_dict["hurt_to_tower"] = _clip(d_hurt_tower / 10000.0) * w.get("hurt_to_tower", 0)
+
+        d_tower = (cur["main_tower_hp"] - self.prev["main_tower_hp"]) - (cur["enemy_tower_hp"] - self.prev["enemy_tower_hp"])
+        reward_dict["tower_hp_diff"] = _clip(d_tower) * w.get("tower_hp_diff", 0)
+
+        reward_dict["kill_hero"] = _clip(1.0 * d_kill) * w.get("kill_hero", 0)
+
+        tower_destroyed = 0.0
+        if self.prev["enemy_tower_hp"] > 0 and cur["enemy_tower_hp"] <= 0:
+            tower_destroyed = 1.0
+        reward_dict["destroy_tower"] = _clip(tower_destroyed) * w.get("destroy_tower", 0)
+
+        fwd = self._forward_value(main_hero, frame_data, main_camp)
+        reward_dict["forward"] = _clip(fwd) * w.get("forward", 0)
+
+        # ── 批次2/3 占位 ─────────────────────────────────────
+        reward_dict["minion_attack"] = 0.0
+        reward_dict["monster_attack"] = 0.0
+        reward_dict["heal_smart"] = 0.0
+        reward_dict["flash_smart"] = 0.0
+        reward_dict["tower_dive_penalty"] = 0.0
+        reward_dict["retreat_smart"] = 0.0
+        reward_dict["idle_penalty"] = 0.0
+        reward_dict["luban_skill_0_clear"] = 0.0
+        reward_dict["dirj_skill_2_hit"] = 0.0
+        reward_dict["dirj_skill_2_miss"] = 0.0
+        reward_dict["lane_arrival"] = 0.0
+        reward_dict["early_aggression_penalty"] = 0.0
+
+        # 获取英雄 config_id
+        if main_hero is not None:
+            self.hero_config_id = main_hero.get("config_id", self.hero_config_id)
+
+        # ── 死亡原因推断 ────────────────────────────────────
+        if d_main_dead > 0 and main_hero is not None and enemy_camp is not None:
+            enemy_tower_pos = None
+            for npc in frame_data.get("npc_states", []):
+                if npc.get("sub_type") == 21 and npc["camp"] == enemy_camp:
+                    loc = npc.get("location", {})
+                    enemy_tower_pos = (loc.get("x", 0), loc.get("z", 0))
+                    break
+            if enemy_tower_pos is not None:
+                hero_loc = main_hero.get("location", {})
+                hero_pos_d = (hero_loc.get("x", 0), hero_loc.get("z", 0))
+                dist_to_etower = math.dist(hero_pos_d, enemy_tower_pos)
+                if dist_to_etower <= TOWER_ATTACK_RANGE * 2:
+                    self.death_by_tower += d_main_dead
+                    self.tower_dive_death += d_main_dead
+                else:
+                    self.death_by_hero += d_main_dead
+            self.alive = False
+
+        # ── destroy_tower_flag ──────────────────────────────
+        if tower_destroyed > 0:
+            self.destroy_tower_flag = 1
+
+        # ── 技能使用推断 ────────────────────────────────────
+        summoner_triggered = False
+        if main_hero is not None:
+            skill_slots = main_hero.get("skill_slot_list", [])
+            if not self.prev_skill_cd:
+                self.prev_skill_cd = [s.get("cool_down", 0) for s in skill_slots]
+            for i in range(min(3, len(skill_slots))):
+                prev_cd = self.prev_skill_cd[i] if i < len(self.prev_skill_cd) else 0
+                cur_cd = skill_slots[i].get("cool_down", 0)
+                if prev_cd == 0 and cur_cd > 0:
+                    self.skill_usage[i] += 1
+            prev_skill_cd_snapshot = list(self.prev_skill_cd)
+            self.prev_skill_cd = [s.get("cool_down", 0) for s in skill_slots]
+            if len(skill_slots) > 3:
+                prev_s_cd = self.prev_summoner_cd
+                cur_s_cd = skill_slots[3].get("cool_down", 0)
+                if prev_s_cd == 0 and cur_s_cd > 0:
+                    self.summoner_usage += 1
+                    summoner_triggered = True
+                self.prev_summoner_cd = cur_s_cd
+        else:
+            prev_skill_cd_snapshot = []
+
+        # ── 小兵/怪物/补刀推断（含攻击奖励）────────────────
+        minion_attacked = False
+        monster_attacked = False
+        if main_hero is not None:
+            main_loc = main_hero.get("location", {})
+            main_pos = (main_loc.get("x", 0), main_loc.get("z", 0))
+            enemy_hero_obj = self._hero_by_camp(frame_data, enemy_camp) if enemy_camp else None
+            enemy_loc = enemy_hero_obj.get("location", {}) if enemy_hero_obj else {}
+            enemy_pos = (enemy_loc.get("x", 0), enemy_loc.get("z", 0))
+
+            cur_npcs = {}
+            for npc in frame_data.get("npc_states", []):
+                rid = npc.get("runtime_id")
+                if rid is None:
+                    continue
+                loc = npc.get("location", {})
+                cur_npcs[rid] = {
+                    "hp": npc.get("hp", 0),
+                    "max_hp": npc.get("max_hp", 1),
+                    "sub_type": npc.get("sub_type", 0),
+                    "camp": npc.get("camp", -1),
+                    "x": loc.get("x", 0),
+                    "z": loc.get("z", 0),
+                }
+
+            for rid, prev_npc in self.prev_npcs.items():
+                if prev_npc["hp"] <= 0:
+                    continue
+                cur_npc = cur_npcs.get(rid)
+                sub = prev_npc["sub_type"]
+                mhp = prev_npc["max_hp"]
+
+                if cur_npc is None or cur_npc["hp"] <= 0:
+                    if sub == 21:
+                        pass
+                    elif MINION_MAX_HP_RANGE[0] <= mhp <= MINION_MAX_HP_RANGE[1]:
+                        self.minion_kills += 1
+                        npc_pos = (prev_npc["x"], prev_npc["z"])
+                        d_main = math.dist(main_pos, npc_pos)
+                        d_enemy = math.dist(enemy_pos, npc_pos) if enemy_hero_obj else float("inf")
+                        if d_main < d_enemy:
+                            self.last_hit_count += 1
+                    elif mhp > MONSTER_MAX_HP_THRESHOLD:
+                        self.monster_kills += 1
+
+                elif cur_npc["hp"] < prev_npc["hp"]:
+                    if sub != 21 and MINION_MAX_HP_RANGE[0] <= mhp <= MINION_MAX_HP_RANGE[1] and not minion_attacked:
+                        npc_pos = (prev_npc["x"], prev_npc["z"])
+                        if math.dist(main_pos, npc_pos) < 1500:
+                            minion_attacked = True
+                    elif sub != 21 and mhp > MONSTER_MAX_HP_THRESHOLD and not monster_attacked:
+                        npc_pos = (prev_npc["x"], prev_npc["z"])
+                        if math.dist(main_pos, npc_pos) < 2000:
+                            monster_attacked = True
+
+            self.prev_npcs = cur_npcs
+
+        # ── last_hit 奖励 ───────────────────────────────────
+        d_last_hit = self.last_hit_count - self.prev_last_hit_count
+        if d_last_hit > 0:
+            reward_dict["last_hit"] = _clip(d_last_hit * 0.5) * w.get("last_hit", 0)
+        self.prev_last_hit_count = self.last_hit_count
+
+        # ── 发育奖励 ────────────────────────────────────────
+        if minion_attacked:
+            reward_dict["minion_attack"] = 0.1 * w.get("minion_attack", 0)
+        if monster_attacked:
+            reward_dict["monster_attack"] = 0.1 * w.get("monster_attack", 0)
+
+        # ── 治疗/闪现智能使用奖励 ──────────────────────────
+        if summoner_triggered and main_hero is not None:
+            cur_hp_rate = cur["main_hp_rate"]
+            cur_pos = None
+            loc = main_hero.get("location", {})
+            cur_pos = (loc.get("x", 0), loc.get("z", 0))
+
+            hp_jumped = (self.prev_hp_rate is not None) and (cur_hp_rate > self.prev_hp_rate + 0.05)
+            pos_jumped = False
+            if self.prev_pos is not None and cur_pos is not None:
+                pos_jumped = math.dist(cur_pos, self.prev_pos) > FLASH_DISTANCE_THRESHOLD
+
+            if hp_jumped:
+                self.heal_count += 1
+                if cur_hp_rate < 0.5:
+                    self.heal_smart_count += 1
+                    bonus = (0.5 - self.prev_hp_rate) * 2.0
+                    reward_dict["heal_smart"] = _clip(bonus) * w.get("heal_smart", 0)
+                else:
+                    reward_dict["heal_smart"] = _clip(-1.0) * w.get("heal_smart", 0)
+
+            elif pos_jumped:
+                self.flash_count += 1
+                enemy_hero_obj = self._hero_by_camp(frame_data, enemy_camp) if enemy_camp else None
+                if enemy_hero_obj and cur_pos and self.prev_pos:
+                    e_loc = enemy_hero_obj.get("location", {})
+                    e_pos = (e_loc.get("x", 0), e_loc.get("z", 0))
+                    dist_before = math.dist(self.prev_pos, e_pos)
+                    dist_after = math.dist(cur_pos, e_pos)
+                    moved_away = dist_after > dist_before
+                    if cur["main_hp_rate"] < 0.3 and moved_away:
+                        self.flash_smart_count += 1
+                        reward_dict["flash_smart"] = 1.0 * w.get("flash_smart", 0)
+                    elif cur["main_hp_rate"] < 0.3 and not moved_away:
+                        reward_dict["flash_smart"] = _clip(-1.0) * w.get("flash_smart", 0)
+                    elif cur["main_hp_rate"] > 0.5:
+                        reward_dict["flash_smart"] = _clip(-0.3) * w.get("flash_smart", 0)
+
+        # ── 越塔惩罚 ────────────────────────────────────────
+        if main_hero is not None and enemy_camp is not None:
+            cur_hp_rate = cur["main_hp_rate"]
+            hp_dropped = (self.prev_hp_rate is not None) and (cur_hp_rate < self.prev_hp_rate - 0.005)
+            if hp_dropped:
+                hero_loc = main_hero.get("location", {})
+                hero_pos_now = (hero_loc.get("x", 0), hero_loc.get("z", 0))
+                for npc in frame_data.get("npc_states", []):
+                    if npc.get("sub_type") == 21 and npc.get("camp") == enemy_camp:
+                        t_loc = npc.get("location", {})
+                        t_pos = (t_loc.get("x", 0), t_loc.get("z", 0))
+                        dx = hero_pos_now[0] - t_pos[0]
+                        dz = hero_pos_now[1] - t_pos[1]
+                        dist_to_etower = (dx * dx + dz * dz) ** 0.5
+                        if dist_to_etower < TOWER_ATTACK_RANGE:
+                            reward_dict["tower_dive_penalty"] = _clip(-0.5) * w.get("tower_dive_penalty", 0)
+                            self.tower_dive_count += 1
+                        break
+
+        # ── 残血撤退奖励 ────────────────────────────────────
+        if main_hero is not None and cur["main_hp_rate"] < 0.3:
+            enemy_hp_rate = cur["enemy_hp_rate"]
+            if enemy_hp_rate > cur["main_hp_rate"] * 1.5:
+                my_tower_pos = None
+                for npc in frame_data.get("npc_states", []):
+                    if npc.get("sub_type") == 21 and npc.get("camp") == main_camp:
+                        t_loc = npc.get("location", {})
+                        my_tower_pos = (t_loc.get("x", 0), t_loc.get("z", 0))
+                        break
+                if my_tower_pos is not None and self.prev_pos is not None:
+                    hero_loc = main_hero.get("location", {})
+                    cur_pos_r = (hero_loc.get("x", 0), hero_loc.get("z", 0))
+                    d_now = math.dist(cur_pos_r, my_tower_pos)
+                    d_prev = math.dist(self.prev_pos, my_tower_pos)
+                    if d_now < d_prev:
+                        reward_dict["retreat_smart"] = 0.2 * w.get("retreat_smart", 0)
+
+        # ── 批次3:英雄特定技能引导 ─────────────────────────
+        if main_hero is not None:
+            skill_slots = main_hero.get("skill_slot_list", [])
+
+            # 鲁班一技能清线
+            if self.hero_config_id == 112 and len(skill_slots) > 0:
+                skill_0_triggered = (
+                    len(prev_skill_cd_snapshot) > 0
+                    and prev_skill_cd_snapshot[0] == 0
+                    and skill_slots[0].get("cool_down", 0) > 0
+                )
+                if skill_0_triggered and enemy_camp is not None:
+                    hero_loc = main_hero.get("location", {})
+                    hero_pos_s = (hero_loc.get("x", 0), hero_loc.get("z", 0))
+                    nearby_enemy_minions = 0
+                    for npc in frame_data.get("npc_states", []):
+                        if npc.get("camp") == enemy_camp and npc.get("hp", 0) > 0:
+                            mhp = npc.get("max_hp", 0)
+                            if MINION_MAX_HP_RANGE[0] <= mhp <= MINION_MAX_HP_RANGE[1]:
+                                nloc = npc.get("location", {})
+                                npos = (nloc.get("x", 0), nloc.get("z", 0))
+                                if math.dist(hero_pos_s, npos) < 2000:
+                                    nearby_enemy_minions += 1
+                    if nearby_enemy_minions >= 2:
+                        reward_dict["luban_skill_0_clear"] = 0.3 * w.get("luban_skill_0_clear", 0)
+
+            # 狄仁杰大招命中判定
+            if self.hero_config_id == 133 and len(skill_slots) > 2:
+                skill_2_triggered = (
+                    len(prev_skill_cd_snapshot) > 2
+                    and prev_skill_cd_snapshot[2] == 0
+                    and skill_slots[2].get("cool_down", 0) > 0
+                )
+                if skill_2_triggered:
+                    self.dirj_skill2_use_count += 1
+                    self.skill2_check_window = 8
+                    self.skill2_ref_hp = cur["enemy_hp_rate"]
+
+            if self.skill2_check_window > 0:
+                self.skill2_check_window -= 1
+                if cur["enemy_hp_rate"] < self.skill2_ref_hp - 0.01:
+                    self.dirj_skill2_hit_count += 1
+                    reward_dict["dirj_skill_2_hit"] = 1.0 * w.get("dirj_skill_2_hit", 0)
+                    self.skill2_check_window = 0
+                elif self.skill2_check_window == 0:
+                    reward_dict["dirj_skill_2_miss"] = _clip(-0.3) * w.get("dirj_skill_2_miss", 0)
+
+        # ── 批次3:1级阶段清线优先 ──────────────────────────
+        if cur["main_level"] == 1 and d_hurt_hero > 0:
+            reward_dict["early_aggression_penalty"] = _clip(-0.1) * w.get("early_aggression_penalty", 0)
+
+        # ── 批次3:开局路径引导(前 450 帧向中线靠近)────────
+        if main_hero is not None and self.last_frame_no < 450:
+            hero_loc = main_hero.get("location", {})
+            cur_pos_l = (hero_loc.get("x", 0), hero_loc.get("z", 0))
+            dist_to_mid = math.dist(cur_pos_l, (0, 0))
+            if not self.lane_arrival_done and dist_to_mid < 8000:
+                self.lane_arrival_done = True
+                self.lane_arrival_frame = self.last_frame_no
+            if not self.lane_arrival_done and self.prev_pos is not None:
+                prev_dist_to_mid = math.dist(self.prev_pos, (0, 0))
+                delta = prev_dist_to_mid - dist_to_mid
+                reward_dict["lane_arrival"] = _clip(delta / 1000.0) * 0.3 * w.get("lane_arrival", 0)
+
+        # ── 空闲惩罚 ────────────────────────────────────────
+        if main_hero is not None:
+            hero_loc = main_hero.get("location", {})
+            cur_pos_i = (hero_loc.get("x", 0), hero_loc.get("z", 0))
+            skill_triggered_any = summoner_triggered or (
+                any(
+                    (prev_skill_cd_snapshot[i] if i < len(prev_skill_cd_snapshot) else 1) == 0 and
+                    main_hero.get("skill_slot_list", [{}])[i].get("cool_down", 0) > 0
+                    for i in range(min(3, len(main_hero.get("skill_slot_list", []))))
+                )
+                if prev_skill_cd_snapshot else False
+            )
+            pos_moved = self.prev_pos is not None and math.dist(cur_pos_i, self.prev_pos) > 500
+
+            if not skill_triggered_any and not pos_moved:
+                self.frames_since_action += 1
+            else:
+                self.frames_since_action = 0
+
+            if self.frames_since_action > 90:
+                reward_dict["idle_penalty"] = -0.05 * w.get("idle_penalty", 0)
+                self.idle_frames += 1
+
+        # ── 更新持久化状态 ──────────────────────────────────
+        if main_hero is not None:
+            self.prev_hp_rate = cur["main_hp_rate"]
+            self.prev_enemy_hp_rate = cur["enemy_hp_rate"]
+            h_loc = main_hero.get("location", {})
+            self.prev_pos = (h_loc.get("x", 0), h_loc.get("z", 0))
+
+        # ── forward 累加 ────────────────────────────────────
+        self.forward_acc += fwd
+        self.forward_count += 1
+
+        # ── last_frame_no 更新 ──────────────────────────────
+        self.last_frame_no = frame_data.get("frame_no", self.last_frame_no)
+
+        # ── reward_sum ──────────────────────────────────────
+        reward_sum = sum(v for k, v in reward_dict.items() if k != "reward_sum")
         reward_dict["reward_sum"] = reward_sum
+
+        self.prev = cur.copy()
+        return reward_dict
+
+    def get_episode_stats(self):
+        avg_forward = self.forward_acc / max(self.forward_count, 1)
+        survive_ratio = 1.0 if self.alive else round(
+            self.last_frame_no / max(self.last_frame_no, 1), 4
+        )
+        return {
+            "death_by_hero": self.death_by_hero,
+            "death_by_tower": self.death_by_tower,
+            "skill_0_usage": self.skill_usage[0],
+            "skill_1_usage": self.skill_usage[1],
+            "skill_2_usage": self.skill_usage[2],
+            "summoner_usage": self.summoner_usage,
+            "minion_kills": self.minion_kills,
+            "monster_kills": self.monster_kills,
+            "last_hit_count": self.last_hit_count,
+            "avg_forward_value": round(avg_forward, 4),
+            "destroy_tower_flag": self.destroy_tower_flag,
+            "survive_ratio": survive_ratio,
+            "death_frame_no": self.last_frame_no if not self.alive else 0,
+            "heal_efficiency": round(self.heal_smart_count / max(self.heal_count, 1), 3),
+            "flash_efficiency": round(self.flash_smart_count / max(self.flash_count, 1), 3),
+            "tower_dive_count": self.tower_dive_count,
+            "tower_dive_death": self.tower_dive_death,
+            "idle_ratio": round(self.idle_frames / max(self.last_frame_no, 1), 3),
+            "dirj_skill2_hit_ratio": round(
+                self.dirj_skill2_hit_count / max(self.dirj_skill2_use_count, 1), 3
+            ),
+            "dirj_skill2_use_count": self.dirj_skill2_use_count,
+            "lane_arrival_frame": self.lane_arrival_frame,
+        }

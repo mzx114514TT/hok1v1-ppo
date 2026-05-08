@@ -56,14 +56,6 @@ class FeatureProcess:
         own_tower_feature = self.process_own_tower_feature(frame_state)
         soldier_feature = self.process_soldier_feature(frame_state)
 
-        # DIAGNOSTIC
-        print(f"[FEATURE_DIMS] hero={len(main_camp_hero_vector_feature)} "
-              f"enemy={len(enemy_camp_hero_vector_feature)} "
-              f"organ={len(organ_feature)} "
-              f"tower={len(own_tower_feature)} "
-              f"soldier={len(soldier_feature)} "
-              f"TOTAL={len(main_camp_hero_vector_feature + enemy_camp_hero_vector_feature + organ_feature + own_tower_feature + soldier_feature)}")
-
         feature = (
             main_camp_hero_vector_feature
             + enemy_camp_hero_vector_feature

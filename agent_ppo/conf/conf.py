@@ -9,23 +9,57 @@ Author: Tencent AI Arena Authors
 
 
 class GameConfig:
-    # Set the weight of each reward item and use it in reward_manager
-    # 设置各个回报项的权重，在reward_manager中使用
+    # 22 项奖励权重 — 从齐梓桐模型移植 + CC 原有 tower_hp_point/hp_point 保留语义
     REWARD_WEIGHT_DICT = {
-        "tower_hp_point": 8.0,
-        "hp_point": 2.0,
-        "kill": 3.0,
-        "death": 3.0,
-        "money": 1.0,
-        "exp": 0.5,
-        "last_hit": 0.5,
+        # ── 基础 12 项（原齐梓桐批次1，对齐 CC 语义）──────────
+        "death_penalty": 3.0,
+        "hp_diff": 1.0,
+        "last_hit": 2.0,
+        "money_diff": 1.0,
+        "exp_diff": 0.5,
+        "level_diff": 0.5,
+        "hurt_to_hero": 1.0,
+        "hurt_to_tower": 2.0,
+        "tower_hp_diff": 3.0,
+        "kill_hero": 5.0,
+        "destroy_tower": 5.0,
+        "forward": 0.5,
+        # ── 批次2：发育与生存（7 项）─────────────────────────
+        "minion_attack": 0.5,
+        "monster_attack": 0.5,
+        "heal_smart": 1.0,
+        "flash_smart": 1.0,
+        "tower_dive_penalty": 1.5,
+        "retreat_smart": 1.0,
+        "idle_penalty": 0.5,
+        # ── 批次3：英雄特定（5 项，鲁班/狄仁杰）───────────────
+        "luban_skill_0_clear": 1.0,
+        "dirj_skill_2_hit": 2.0,
+        "dirj_skill_2_miss": 1.0,
+        "lane_arrival": 1.0,
+        "early_aggression_penalty": 1.0,
     }
-    # Time decay factor, used in reward_manager
-    # 时间衰减因子，在reward_manager中使用
-    TIME_SCALE_ARG = 20000
-    # Model save interval configuration, used in workflow
-    # 模型保存间隔配置，在workflow中使用
+    TIME_SCALE_ARG = 0  # 22 项奖励不使用时间衰减（已按语义设计）
     MODEL_SAVE_INTERVAL = 1800
+
+
+# ── 数据协议标定值（默认值，运行 NPC_DEBUG/BUTTON_DEBUG 后校准）──
+BUTTON_INDEX = {
+    "noop_or_attack": 0,
+    "skill_1": -1,
+    "skill_2": -1,
+    "skill_3": -1,
+    "summoner": -1,
+    "recall": -1,
+}
+
+# NPC max_hp 范围（通过 NPC_DEBUG 日志标定后调整）
+MINION_MAX_HP_RANGE = (1000, 6000)
+MONSTER_MAX_HP_THRESHOLD = 6000
+
+# 距离阈值（游戏坐标系，待校准）
+TOWER_ATTACK_RANGE = 1500
+FLASH_DISTANCE_THRESHOLD = 1500
 
 
 # Dimension configuration, used when building the model
