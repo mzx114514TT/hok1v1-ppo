@@ -74,7 +74,10 @@ class Algorithm:
             self.optimizer.zero_grad()
 
             rst_list = self.model(format_inputs)
-            total_loss, info_list = self.model.compute_loss(data_list, rst_list)
+            if self.train_step < Config.BC_WARMUP_STEPS:
+                total_loss, info_list = self.model.compute_bc_loss(data_list, rst_list)
+            else:
+                total_loss, info_list = self.model.compute_loss(data_list, rst_list)
 
             total_loss.backward()
 

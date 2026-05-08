@@ -74,6 +74,7 @@ class Config:
     PPO_EPOCHS = 3
     WEIGHT_DECAY = 1e-4
     BETA_START = 0.05
+    BC_WARMUP_STEPS = 600
     LOG_EPSILON = 1e-6
     LABEL_SIZE_LIST = [12, 16, 16, 16, 16, 9]
     IS_REINFORCE_TASK_LIST = [

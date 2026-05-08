@@ -319,6 +319,33 @@ class Model(nn.Module):
             [self.value_cost, self.policy_cost, self.entropy_cost],
         ]
 
+    def compute_bc_loss(self, data_list, rst_list):
+        seri_vec = data_list[0].reshape(-1, self.data_split_shape[0])
+        usq_reward = data_list[1].reshape(-1, self.data_split_shape[1])
+
+        usq_label_list = data_list[3 : 3 + len(self.label_size_list)]
+        for shape_index in range(len(self.label_size_list)):
+            usq_label_list[shape_index] = (
+                usq_label_list[shape_index].reshape(-1, self.data_split_shape[3 + shape_index]).long()
+            )
+
+        reward = usq_reward.squeeze(dim=1)
+        label_result = rst_list[:-1]
+        value_result = rst_list[-1]
+
+        # Cross-entropy BC loss for each action head
+        bc_loss = torch.tensor(0.0)
+        for i in range(len(self.label_size_list)):
+            labels = usq_label_list[i].squeeze(dim=1)
+            bc_loss = bc_loss + F.cross_entropy(label_result[i], labels)
+
+        # Value loss (Huber)
+        fc2_value_result_squeezed = value_result.squeeze(dim=1)
+        self.value_cost = F.smooth_l1_loss(fc2_value_result_squeezed, reward)
+
+        self.loss = bc_loss + self.value_cost
+        return self.loss, [self.loss, [self.value_cost, bc_loss, torch.tensor(0.0)]]
+
     def set_train_mode(self):
         self.lstm_time_steps = Config.LSTM_TIME_STEPS
         self.train()

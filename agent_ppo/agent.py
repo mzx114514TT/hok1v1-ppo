@@ -25,6 +25,7 @@ from agent_ppo.feature.reward_process import GameRewardManager
 from torch.optim.lr_scheduler import LambdaLR
 from agent_ppo.algorithm.algorithm import Algorithm
 from agent_ppo.feature.feature_process import FeatureProcess
+from agent_ppo.bc import RuleBot
 
 
 # Available summoner skills / 可选召唤师技能
@@ -131,6 +132,7 @@ class Agent(BaseAgent):
         self.lstm_cell = np.zeros([self.lstm_unit_size])
         self.reward_manager = GameRewardManager(self.player_id)
         self.feature_processes = FeatureProcess(self.hero_camp)
+        self.rule_bot = RuleBot(self.hero_camp)
 
     def _model_inference(self, list_obs_data):
         # Using the network for inference
@@ -187,7 +189,14 @@ class Agent(BaseAgent):
             obs_data = self.observation_process(observation)
             act_data = self._model_inference([obs_data])[0]
             self.update_status(obs_data, act_data)
-            action = self.action_process(observation, act_data, True)
+
+            # BC warmup: override network action with rule_bot action
+            if self.algorithm.train_step < Config.BC_WARMUP_STEPS and self.rule_bot is not None:
+                rule_action = self.rule_bot.act(observation)
+                self.act_data.action = rule_action
+                self.act_data.d_action = rule_action
+
+            action = self.action_process(observation, self.act_data, True)
             return action
         except Exception as e:
             import traceback
