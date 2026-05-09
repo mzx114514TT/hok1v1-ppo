@@ -67,6 +67,7 @@ class GameRewardManager:
         self.prev_enemy_hp_rate = None
         self.prev_pos = None
         self.prev_enemy_pos = None
+        self.prev_dist_to_enemy_tower = None
         self.heal_count = 0
         self.heal_smart_count = 0
         self.flash_count = 0
@@ -112,26 +113,23 @@ class GameRewardManager:
     def _forward_value(self, main_hero, frame_data, main_camp):
         if main_hero is None:
             return 0.0
-        hp_rate = main_hero.get("hp", 0) / max(main_hero.get("max_hp", 1), 1)
-        if hp_rate < 0.5:
-            return 0.0
-        my_tower, enemy_tower = None, None
+        enemy_tower = None
         for npc in frame_data["npc_states"]:
-            if npc.get("sub_type") == 21:
-                if npc["camp"] == main_camp:
-                    my_tower = npc
-                else:
-                    enemy_tower = npc
-        if my_tower is None or enemy_tower is None:
+            if npc.get("sub_type") == 21 and npc["camp"] != main_camp:
+                enemy_tower = npc
+                break
+        if enemy_tower is None:
             return 0.0
         hero_pos = (main_hero["location"]["x"], main_hero["location"]["z"])
-        my_pos = (my_tower["location"]["x"], my_tower["location"]["z"])
         en_pos = (enemy_tower["location"]["x"], enemy_tower["location"]["z"])
-        dist_hero_enemy = math.dist(hero_pos, en_pos)
-        dist_my_enemy = math.dist(my_pos, en_pos)
-        if dist_hero_enemy > dist_my_enemy:
+        cur_dist = math.dist(hero_pos, en_pos)
+        if self.prev_dist_to_enemy_tower is None:
+            self.prev_dist_to_enemy_tower = cur_dist
             return 0.0
-        return (dist_my_enemy - dist_hero_enemy) / max(dist_my_enemy, 1)
+        delta = self.prev_dist_to_enemy_tower - cur_dist  # 正值=靠近敌塔
+        self.prev_dist_to_enemy_tower = cur_dist
+        # 归一化到 [-1, 1]，用地图对角线约30000作为参考
+        return max(-1.0, min(1.0, delta / 300.0))
 
     def result(self, frame_data):
         main_camp, enemy_camp = self._find_camps(frame_data)
