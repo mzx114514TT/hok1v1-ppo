@@ -36,6 +36,7 @@ class Model(nn.Module):
         self.is_reinforce_task_list = Config.IS_REINFORCE_TASK_LIST
         self.min_policy = Config.MIN_POLICY
         self.clip_param = Config.CLIP_PARAM
+        self.dual_clip_c = Config.DUAL_CLIP_C
         self.restore_list = []
         self.var_beta = self.m_var_beta
         self.learning_rate = self.m_learning_rate
@@ -273,12 +274,18 @@ class Model(nn.Module):
                 old_policy_log_p = torch.log(old_policy_p)
                 final_log_p = final_log_p + policy_log_p - old_policy_log_p
                 ratio = torch.exp(final_log_p)
-                clip_ratio = ratio.clamp(0.0, 3.0)
 
-                surr1 = clip_ratio * advantage
+                # Dual-clip PPO (AAAI 2020): advantage<0 时额外 clip 到 c·A，防止 off-policy 样本造成策略崩溃
+                surr1 = ratio * advantage
                 surr2 = ratio.clamp(1.0 - self.clip_param, 1.0 + self.clip_param) * advantage
+                surr_min = torch.minimum(surr1, surr2)
+                dual_clipped = torch.where(
+                    advantage < 0,
+                    torch.maximum(surr_min, self.dual_clip_c * advantage),
+                    surr_min,
+                )
                 temp_policy_loss = -torch.sum(
-                    torch.minimum(surr1, surr2) * (weight_list[task_index].float()) * frame_is_train
+                    dual_clipped * (weight_list[task_index].float()) * frame_is_train
                 ) / torch.maximum(torch.sum((weight_list[task_index].float()) * frame_is_train), torch.tensor(1.0))
 
                 self.policy_cost = self.policy_cost + temp_policy_loss

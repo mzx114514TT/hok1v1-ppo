@@ -9,37 +9,36 @@ Author: Tencent AI Arena Authors
 
 
 class GameConfig:
-    # 22 项奖励权重 — 从齐梓桐模型移植 + CC 原有 tower_hp_point/hp_point 保留语义
+    # 8 项核心奖励 — 对齐 AAAI 2020 论文设计，删除未校准的推断类奖励
     REWARD_WEIGHT_DICT = {
-        # ── 基础 12 项（原齐梓桐批次1，对齐 CC 语义）──────────
-        "death_penalty": 1.5,
-        "hp_diff": 1.0,
-        "last_hit": 2.0,
-        "money_diff": 1.0,
-        "exp_diff": 0.5,
-        "level_diff": 0.5,
-        "hurt_to_hero": 2.0,
-        "hurt_to_tower": 2.0,
-        "tower_hp_diff": 3.0,
-        "kill_hero": 10.0,
-        "destroy_tower": 5.0,
-        "forward": 0.5,
-        # ── 批次2：发育与生存（7 项）─────────────────────────
-        "minion_attack": 0.5,
-        "monster_attack": 0.5,
-        "heal_smart": 1.0,
-        "flash_smart": 1.0,
-        "tower_dive_penalty": 1.5,
-        "retreat_smart": 1.0,
-        "idle_penalty": 0.5,
-        # ── 批次3：英雄特定（5 项，鲁班/狄仁杰）───────────────
-        "luban_skill_0_clear": 1.0,
-        "dirj_skill_2_hit": 2.0,
-        "dirj_skill_2_miss": 1.0,
-        "lane_arrival": 1.0,
-        "early_aggression_penalty": 1.0,
+        "death_penalty": 1.0,    # 论文 -1.0
+        "hp_diff": 2.0,          # 论文 2.0
+        "last_hit": 0.5,         # 论文 0.5
+        "money_diff": 0.006,     # 论文 0.008，零和金币差
+        "exp_diff": 0.006,       # 论文 0.008，零和经验差
+        "hurt_to_hero": 2.0,     # 保留，鼓励对英雄输出
+        "hurt_to_tower": 3.0,    # 保留，鼓励推塔
+        "tower_hp_diff": 10.0,   # 论文 10.0（最高权重，推塔是核心目标）
+        "kill_hero": 5.0,        # 保留击杀奖励
+        "destroy_tower": 10.0,   # 配合 tower_hp_diff
+        "forward": 0.5,          # 保留前进引导
+        # 以下推断类奖励权重清零（BUTTON_INDEX/距离阈值未校准，易发错信号）
+        "level_diff": 0.0,
+        "minion_attack": 0.0,
+        "monster_attack": 0.0,
+        "heal_smart": 0.0,
+        "flash_smart": 0.0,
+        "tower_dive_penalty": 0.0,
+        "retreat_smart": 0.0,
+        "idle_penalty": 0.0,
+        "luban_skill_0_clear": 0.0,
+        "dirj_skill_2_hit": 0.0,
+        "dirj_skill_2_miss": 0.0,
+        "lane_arrival": 0.0,
+        "early_aggression_penalty": 0.0,
     }
-    TIME_SCALE_ARG = 0  # 22 项奖励不使用时间衰减（已按语义设计）
+    TIME_SCALE_ARG = 0
+    MODEL_SAVE_INTERVAL = 1800
     MODEL_SAVE_INTERVAL = 1800
 
 
@@ -120,7 +119,8 @@ class Config:
         True,
     ]
 
-    CLIP_PARAM = 0.1
+    CLIP_PARAM = 0.2
+    DUAL_CLIP_C = 3.0  # Dual-clip PPO 下界常数（AAAI 2020 论文值）
 
     MIN_POLICY = 0.00001
 
@@ -156,7 +156,7 @@ class Config:
     LEGAL_ACTION_SIZE_LIST = LABEL_SIZE_LIST.copy()
     LEGAL_ACTION_SIZE_LIST[-1] = LEGAL_ACTION_SIZE_LIST[-1] * LEGAL_ACTION_SIZE_LIST[0]
 
-    GAMMA = 0.99
+    GAMMA = 0.997
     LAMDA = 0.95
 
     USE_GRAD_CLIP = True
