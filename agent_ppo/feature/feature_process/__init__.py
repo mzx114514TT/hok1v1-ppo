@@ -11,6 +11,11 @@ from agent_ppo.feature.feature_process.hero_process import HeroProcess
 from agent_ppo.feature.feature_process.organ_process import OrganProcess
 from agent_ppo.feature.feature_process.own_tower_process import OwnTowerProcess
 from agent_ppo.feature.feature_process.soldier_process import SoldierProcess
+from agent_ppo.feature.feature_process.enhanced_features import (
+    ENHANCED_DIM_TOTAL,
+    MoneyTracker,
+    build_enhanced_features,
+)
 
 
 class FeatureProcess:
@@ -22,6 +27,7 @@ class FeatureProcess:
         self.organ_process = OrganProcess(camp)
         self.own_tower_process = OwnTowerProcess(camp)
         self.soldier_process = SoldierProcess(camp)
+        self.money_tracker = MoneyTracker()
 
     def reset(self, camp):
         self.camp = camp
@@ -31,6 +37,7 @@ class FeatureProcess:
         self.organ_process = OrganProcess(camp)
         self.own_tower_process = OwnTowerProcess(camp)
         self.soldier_process = SoldierProcess(camp)
+        self.money_tracker.reset()
 
     def process_organ_feature(self, frame_state):
         return self.organ_process.process_vec_organ(frame_state)
@@ -56,7 +63,7 @@ class FeatureProcess:
         own_tower_feature = self.process_own_tower_feature(frame_state)
         soldier_feature = self.process_soldier_feature(frame_state)
 
-        feature = (
+        base_feature = (
             main_camp_hero_vector_feature
             + enemy_camp_hero_vector_feature
             + organ_feature
@@ -64,4 +71,5 @@ class FeatureProcess:
             + soldier_feature
         )
 
-        return feature
+        enhanced = build_enhanced_features(frame_state, self.camp, self.money_tracker)
+        return base_feature + enhanced

@@ -63,8 +63,12 @@ FLASH_DISTANCE_THRESHOLD = 1500
 
 # Dimension configuration, used when building the model
 # 维度配置，构建模型时使用
+# 63 原有扁平特征 + 267 增强特征(位置one-hot/HP离散/CD离散/金币离散)
+FEATURE_DIM = 63 + 267  # 330
+
+
 class DimConfig:
-    DIM_OF_FEATURE = [63]
+    DIM_OF_FEATURE = [FEATURE_DIM]
 
 
 # Configuration related to model and algorithms used
@@ -74,7 +78,7 @@ class Config:
     LSTM_TIME_STEPS = 16
     LSTM_UNIT_SIZE = 512
     DATA_SPLIT_SHAPE = [
-        63 + 85,
+        FEATURE_DIM + 85,
         1,
         1,
         1,
@@ -99,7 +103,7 @@ class Config:
         LSTM_UNIT_SIZE,
         LSTM_UNIT_SIZE,
     ]
-    SERI_VEC_SPLIT_SHAPE = [(63,), (85,)]
+    SERI_VEC_SPLIT_SHAPE = [(FEATURE_DIM,), (85,)]
     INIT_LEARNING_RATE_START = 3e-4
     TARGET_LR = 1e-5
     TARGET_STEP = 5000
@@ -127,7 +131,7 @@ class Config:
     TARGET_EMBED_DIM = 32
 
     data_shapes = [
-        [(63 + 85) * 16],
+        [(FEATURE_DIM + 85) * 16],
         [16],
         [16],
         [16],
