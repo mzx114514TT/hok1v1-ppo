@@ -12,16 +12,16 @@ class GameConfig:
     # 22 项奖励权重 — 从齐梓桐模型移植 + CC 原有 tower_hp_point/hp_point 保留语义
     REWARD_WEIGHT_DICT = {
         # ── 基础 12 项（原齐梓桐批次1，对齐 CC 语义）──────────
-        "death_penalty": 3.0,
+        "death_penalty": 1.5,
         "hp_diff": 1.0,
         "last_hit": 2.0,
         "money_diff": 1.0,
         "exp_diff": 0.5,
         "level_diff": 0.5,
-        "hurt_to_hero": 1.0,
+        "hurt_to_hero": 2.0,
         "hurt_to_tower": 2.0,
         "tower_hp_diff": 3.0,
-        "kill_hero": 5.0,
+        "kill_hero": 10.0,
         "destroy_tower": 5.0,
         "forward": 0.5,
         # ── 批次2：发育与生存（7 项）─────────────────────────
@@ -107,8 +107,8 @@ class Config:
     WARMUP_STEPS = 500
     PPO_EPOCHS = 3
     WEIGHT_DECAY = 1e-4
-    BETA_START = 0.05
-    BC_WARMUP_STEPS = 600
+    BETA_START = 0.1
+    BC_WARMUP_STEPS = 200
     LOG_EPSILON = 1e-6
     LABEL_SIZE_LIST = [12, 16, 16, 16, 16, 9]
     IS_REINFORCE_TASK_LIST = [
