@@ -135,7 +135,18 @@ class Config:
 
     MIN_POLICY = 0.00001
 
-    TARGET_EMBED_DIM = 32
+    TARGET_EMBED_DIM = 64
+
+    # ── Entity Attention (from 齐梓桐 SCAN) ──────────────────
+    ENTITY_DIM = 128          # per-entity encoding dimension
+    NUM_ENTITY_HEADS = 4      # attention heads for entity self-attention
+    NUM_ENTITIES = 12         # self_hero + enemy_hero + 4 our_soldiers + 4 enemy_soldiers + our_tower + enemy_tower
+    ENTITY_SELF_HERO = 0
+    ENTITY_ENEMY_HERO = 1
+    ENTITY_OUR_SOLDIERS = (2, 6)
+    ENTITY_ENEMY_SOLDIERS = (6, 10)
+    ENTITY_OUR_TOWER = 10
+    ENTITY_ENEMY_TOWER = 11
 
     data_shapes = [
         [(FEATURE_DIM + 85) * 16],

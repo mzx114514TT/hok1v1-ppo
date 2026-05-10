@@ -95,80 +95,188 @@ class Model(nn.Module):
                 for label_index in range(len(self.label_size_list))
             }
         )
-        self.lstm_tar_embed_mlp = make_fc_layer(self.lstm_unit_size, self.target_embed_dim)
+        # ── Entity Attention (齐梓桐 SCAN port) ──────────────────
+        from agent_ppo.conf.conf import Config as Cfg
+        self.entity_dim = Cfg.ENTITY_DIM
+        self.num_entities = Cfg.NUM_ENTITIES
+
+        # Entity slice extraction: project each entity group from feature vector gaps to entity_dim
+        from agent_ppo.feature.cc_obs_builder import DIM_HERO, DIM_SOLDIER, DIM_ORGAN
+        self.entity_proj_self_hero = nn.Sequential(
+            make_fc_layer(DIM_HERO, 256), nn.ReLU(),
+            make_fc_layer(256, self.entity_dim), nn.ReLU(),
+        )
+        self.entity_proj_enemy_hero = nn.Sequential(
+            make_fc_layer(DIM_HERO, 256), nn.ReLU(),
+            make_fc_layer(256, self.entity_dim), nn.ReLU(),
+        )
+        self.entity_proj_soldier = nn.Sequential(
+            make_fc_layer(DIM_SOLDIER, 256), nn.ReLU(),
+            make_fc_layer(256, self.entity_dim), nn.ReLU(),
+        )
+        self.entity_proj_tower = nn.Sequential(
+            make_fc_layer(DIM_ORGAN, 256), nn.ReLU(),
+            make_fc_layer(256, self.entity_dim), nn.ReLU(),
+        )
+
+        # Entity self-attention with sparse mask (2 layers)
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=self.entity_dim, nhead=Cfg.NUM_ENTITY_HEADS,
+            dim_feedforward=self.entity_dim * 2, dropout=0.0,
+            batch_first=True, activation="relu",
+        )
+        self.entity_attn = nn.TransformerEncoder(enc_layer, num_layers=2)
+        self.register_buffer("entity_sparse_mask", _build_entity_sparse_mask())
+
+        # Self-hero queries entities to extract key info
+        self.entity_query_attn = nn.MultiheadAttention(
+            embed_dim=self.entity_dim, num_heads=Cfg.NUM_ENTITY_HEADS, batch_first=True,
+        )
+
+        # Fuse entity context into the main pathway
+        self.entity_fusion = make_fc_layer(1024 + self.entity_dim, self.lstm_unit_size)
+
+        # ── Target Attention (齐梓桐 SCAN port) ──────────────────
+        # Per-target-type embedding projectors (operate on attended entity tokens)
+        self.tar_proj_hero = make_fc_layer(self.entity_dim, self.target_embed_dim)
+        self.tar_proj_tower = make_fc_layer(self.entity_dim, self.target_embed_dim)
+        self.tar_proj_soldier = make_fc_layer(self.entity_dim, self.target_embed_dim)
+        self.tar_query = make_fc_layer(self.lstm_unit_size, self.target_embed_dim)
 
         self.value_mlp = MLP([256, 256, 1], "hero_value_mlp")
 
-        self.target_embed_mlp = make_fc_layer(self.target_embed_dim, self.target_embed_dim, use_bias=False)
+    def _extract_entity_tokens(self, feature_vec):
+        """Extract 12 entity tokens from feature vector gaps."""
+        from agent_ppo.feature.cc_obs_builder import (
+            DIM_HERO, DIM_SOLDIER, DIM_ORGAN, SOLDIER_MAX_NUM,
+        )
+        S = SOLDIER_MAX_NUM
+        tokens = []
+        # self_hero: offset 0
+        tokens.append(self.entity_proj_self_hero(feature_vec[:, :DIM_HERO]))
+        # enemy_hero: offset DIM_HERO
+        off = DIM_HERO
+        tokens.append(self.entity_proj_enemy_hero(feature_vec[:, off:off + DIM_HERO]))
+        # our soldiers: offset DIM_HERO*2, 4 soldiers each DIM_SOLDIER
+        off = DIM_HERO * 2
+        for i in range(S):
+            tokens.append(self.entity_proj_soldier(feature_vec[:, off:off + DIM_SOLDIER]))
+            off += DIM_SOLDIER
+        # enemy soldiers
+        for i in range(S):
+            tokens.append(self.entity_proj_soldier(feature_vec[:, off:off + DIM_SOLDIER]))
+            off += DIM_SOLDIER
+        # our tower
+        tokens.append(self.entity_proj_tower(feature_vec[:, off:off + DIM_ORGAN]))
+        off += DIM_ORGAN
+        # enemy tower
+        tokens.append(self.entity_proj_tower(feature_vec[:, off:off + DIM_ORGAN]))
+        return torch.stack(tokens, dim=1)  # (B, 12, entity_dim)
 
     def forward(self, data_list, inference=False):
         feature_vec, lstm_hidden_init, lstm_cell_init = data_list
 
-        result_list = []
-
-        # public concat -> ResBlocks -> project -> TemporalAttn -> LSTM
-        # 特征提取：输入投射 -> 两个残差块 -> LayerNorm -> 投射到 LSTM 维度 -> 时间注意力
+        # ── Main pathway: FC -> ResBlocks ──────────────────────
         fc_public_result = self.input_act(self.input_proj(feature_vec))
         fc_public_result = self.res_block1(fc_public_result)
         fc_public_result = self.res_block2(fc_public_result)
         fc_public_result = self.concat_norm(fc_public_result)
-        fc_public_result = self.pre_lstm_act(self.pre_lstm_proj(fc_public_result))
 
-        # LSTM: reshape [B*T, 512] -> [B, T, 512], temporal attention, run, reshape back
-        # 训练时 T=lstm_time_steps=16, 推理时 T=1
+        # ── Entity Attention pathway ───────────────────────────
+        entity_tokens = self._extract_entity_tokens(feature_vec)
+        entity_tokens = self.entity_attn(
+            entity_tokens, mask=self.entity_sparse_mask
+        )
+        # self_hero queries entities for key info
+        self_query = entity_tokens[:, :1, :]  # (B, 1, entity_dim)
+        key_info, _ = self.entity_query_attn(
+            query=self_query, key=entity_tokens, value=entity_tokens
+        )
+        key_info = key_info.squeeze(1)  # (B, entity_dim)
+
+        # ── Fusion: concat ResBlock output + entity context ────
+        fused = torch.cat([fc_public_result, key_info], dim=-1)
+        fused = self.pre_lstm_act(self.entity_fusion(fused))
+
+        # ── LSTM: reshape, temporal attn, run, reshape back ────
         T = self.lstm_time_steps
-        BT = fc_public_result.shape[0]
+        BT = fused.shape[0]
         B = BT // T
-        lstm_input = fc_public_result.view(B, T, -1)
-
-        # Temporal self-attention over T frames before LSTM
-        # 时间轴自注意力：让每帧看到所有帧的上下文（训练时有效，推理时 T=1 退化为恒等）
+        lstm_input = fused.view(B, T, -1)
         lstm_input = self.temporal_attn(lstm_input)
 
-        # Initial hidden/cell state shape: [num_layers=1, B, lstm_unit_size]
-        # 初始 hidden/cell 来自 batch 的第一帧状态
         h_0 = lstm_hidden_init.view(B, -1).unsqueeze(0).contiguous()
         c_0 = lstm_cell_init.view(B, -1).unsqueeze(0).contiguous()
-
         lstm_out, (h_n, c_n) = self.lstm(lstm_input, (h_0, c_0))
-
-        # Save final LSTM state for inference (transported back to agent)
-        # 保存 LSTM 最终状态，供推理时透传给 agent
         self.lstm_hidden_output = h_n
         self.lstm_cell_output = c_n
-
-        # Flatten time dim back: [B, T, 512] -> [B*T, 512]
         lstm_features = lstm_out.contiguous().view(BT, -1)
         lstm_features = self.lstm_dropout(lstm_features)
 
-        # 策略分支和价值分支分离（value detach 防止策略梯度干扰价值网络）
-        # Policy and value branches separation (value detaches to stabilize training)
+        # ── Policy / Value branch separation ──────────────────
         policy_feature = self.policy_fc(lstm_features)
         policy_feature = self.policy_norm(policy_feature)
-
         value_feature = self.value_fc(lstm_features.detach())
         value_feature = self.value_norm(value_feature)
 
-        # output label
-        # 输出标签
-        for label_index, label_dim in enumerate(self.label_size_list[:]):
-            label_mlp_out = self.label_mlp["hero_label{0}_mlp".format(label_index)](policy_feature)
-            result_list.append(label_mlp_out)
+        # ── Action heads (5: button, move_x, move_z, skill_x, skill_z) ──
+        result_list = []
+        for label_index in range(len(self.label_size_list) - 1):
+            result_list.append(
+                self.label_mlp[f"hero_label{label_index}_mlp"](policy_feature)
+            )
 
-        # output value
-        # 输出价值
+        # ── Target Attention (label_index 5) ──────────────────
+        target_logits = self._compute_target_attention(
+            entity_tokens, lstm_features
+        )
+        result_list.append(target_logits)
+
+        # ── Value head ─────────────────────────────────────────
         value_result = self.value_mlp(value_feature)
         result_list.append(value_result)
 
-        # prepare for infer graph
-        # 准备推理图
-        logits = torch.flatten(torch.cat(result_list[:-1], 1), start_dim=1)
+        logits = torch.cat(result_list[:-1], 1)
         value = result_list[-1]
 
         if inference:
             return [logits, value, self.lstm_cell_output, self.lstm_hidden_output]
         else:
             return result_list
+
+    def _compute_target_attention(self, entity_tokens, lstm_features):
+        """Target attention: dot-product Q·K over target candidates.
+
+        entity_tokens: (BT, 12, entity_dim) — after entity self-attention
+        lstm_features: (BT, lstm_unit_size)
+        Returns: (BT, 9) target logits
+        """
+        from agent_ppo.conf.conf import Config as Cfg
+        E_HERO = Cfg.ENTITY_ENEMY_HERO       # 1
+        E_SOL = Cfg.ENTITY_ENEMY_SOLDIERS     # (6, 10)
+        E_TOWER = Cfg.ENTITY_ENEMY_TOWER      # 11
+
+        # Target embeddings from attended entity tokens
+        hero_emb = self.tar_proj_hero(entity_tokens[:, E_HERO, :])          # (B, 64)
+        tower_emb = self.tar_proj_tower(entity_tokens[:, E_TOWER, :])       # (B, 64)
+        soldier_embs = self.tar_proj_soldier(entity_tokens[:, E_SOL[0]:E_SOL[1], :])  # (B, 4, 64)
+
+        pad_emb = torch.full_like(hero_emb, 0.1)
+        target_embs = torch.stack([
+            pad_emb,                     # 0: pad
+            hero_emb,                    # 1: enemy hero
+            tower_emb,                   # 2: enemy tower
+            soldier_embs[:, 0, :],       # 3: enemy soldier 0
+            soldier_embs[:, 1, :],       # 4: enemy soldier 1
+            soldier_embs[:, 2, :],       # 5: enemy soldier 2
+            soldier_embs[:, 3, :],       # 6: enemy soldier 3
+            pad_emb,                     # 7: crab (pad)
+            pad_emb,                     # 8: pad
+        ], dim=1)  # (B, 9, 64)
+
+        query = self.tar_query(lstm_features).unsqueeze(1)  # (B, 1, 64)
+        logits = torch.bmm(query, target_embs.transpose(1, 2)).squeeze(1)  # (B, 9)
+        return logits
 
     def compute_loss(self, data_list, rst_list):
         seri_vec = data_list[0].reshape(-1, self.data_split_shape[0])
@@ -416,6 +524,26 @@ class TemporalSelfAttention(nn.Module):
             return x
         attn_out, _ = self.attn(x, x, x)
         return self.norm(x + self.dropout(attn_out))
+
+
+def _build_entity_sparse_mask():
+    """Build 12x12 sparse attention mask for entity tokens.
+
+    Token layout (from Config constants):
+      0: self_hero
+      1: enemy_hero
+      2-5: our_soldiers (4)
+      6-9: enemy_soldiers (4)
+      10: our_tower
+      11: enemy_tower
+
+    Blocked (-inf): same-side soldiers internal, same-side towers internal.
+    """
+    N = 12
+    mask = torch.zeros(N, N)
+    mask[2:6, 2:6] = float('-inf')   # our soldiers don't attend to each other
+    mask[6:10, 6:10] = float('-inf')  # enemy soldiers don't attend to each other
+    return mask
 
 
 class MLP(nn.Module):
