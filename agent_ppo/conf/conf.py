@@ -38,8 +38,14 @@ class GameConfig:
         "early_aggression_penalty": 0.0,
     }
     TIME_SCALE_ARG = 0
+    DUAL_CLIP_C = 3.0  # Dual-clip PPO 下界常数（AAAI 2020 论文值）
     MODEL_SAVE_INTERVAL = 1800
-    MODEL_SAVE_INTERVAL = 1800
+
+    # ── Debug: 帧数据导出 ──────────────────────────────────
+    DEBUG_DUMP_FRAMES = False  # True 时保存每帧 observation 到 JSON
+    DEBUG_DUMP_INTERVAL = 1000  # 每隔 N 帧保存一次
+    DEBUG_DUMP_MAX_FRAMES = 10  # 每个 episode 最多保存帧数
+    DEBUG_DUMP_EPISODES = None  # [1, 2] 只保存指定 episode，None=所有
 
 
 # ── 数据协议标定值（默认值，运行 NPC_DEBUG/BUTTON_DEBUG 后校准）──

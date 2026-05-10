@@ -11,6 +11,7 @@ Author: Tencent AI Arena Authors
 import os
 import time
 import random
+from agent_ppo.conf.conf import GameConfig
 from agent_ppo.feature.definition import (
     sample_process,
     build_frame,
@@ -169,6 +170,10 @@ class EpisodeRunner:
             frame_no = 0
             reward_sum_list = [0] * self.agent_num
             is_train_test = os.environ.get("is_train_test", "False").lower() == "true"
+            if GameConfig.DEBUG_DUMP_FRAMES:
+                from agent_ppo.debug.frame_dumper import get_dumper
+                dumper = get_dumper()
+                dumper.reset_episode(self.episode_cnt)
             self.logger.info(f"Episode {self.episode_cnt} start, usr_conf is {usr_conf}")
 
             # Reward initialization
@@ -178,6 +183,9 @@ class EpisodeRunner:
                     reward = agent.reward_manager.result(observation[str(i)]["frame_state"])
                     observation[str(i)]["reward"] = reward
                     reward_sum_list[i] += reward["reward_sum"]
+
+            if GameConfig.DEBUG_DUMP_FRAMES:
+                dumper.maybe_dump(observation, 0, GameConfig)
 
             while True:
                 # Initialize the default actions. If the agent does not make a decision, env.step uses the default action.
@@ -220,6 +228,9 @@ class EpisodeRunner:
                         reward = agent.reward_manager.result(observation[str(i)]["frame_state"])
                         observation[str(i)]["reward"] = reward
                         reward_sum_list[i] += reward["reward_sum"]
+
+                if GameConfig.DEBUG_DUMP_FRAMES:
+                    dumper.maybe_dump(observation, frame_no, GameConfig)
 
                 # Normal end or timeout exit, run train_test will exit early
                 # 正常结束或超时退出，运行train_test时会提前退出
