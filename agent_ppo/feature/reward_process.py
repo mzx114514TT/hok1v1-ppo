@@ -87,6 +87,11 @@ class GameRewardManager:
         self.lane_arrival_done = False
         self.lane_arrival_frame = 0
 
+        # 鲁班连招追踪: 大招→1技能→2技能
+        self.luban_combo_stage = 0  # 0=待机, 1=大招已放等1技能, 2=1技能已放等2技能
+        self.luban_combo_window = 0
+        self.luban_combo_count = 0
+
     def _hero_by_camp(self, frame_data, camp):
         for h in frame_data["hero_states"]:
             if h["camp"] == camp:
@@ -438,6 +443,36 @@ class GameRewardManager:
                     if nearby_enemy_minions >= 2:
                         reward_dict["luban_skill_0_clear"] = 0.3 * w.get("luban_skill_0_clear", 0)
 
+                # 鲁班连招: 大招(slots[2]) → 1技能(slots[0]) → 2技能(slots[1])
+                # 检测 CD 跳变判定技能使用: prev_cd==0 → cur_cd>0
+                def _skill_i_triggered(idx):
+                    return (
+                        len(prev_skill_cd_snapshot) > idx
+                        and prev_skill_cd_snapshot[idx] == 0
+                        and len(skill_slots) > idx
+                        and skill_slots[idx].get("cool_down", 0) > 0
+                    )
+
+                if self.luban_combo_window > 0:
+                    self.luban_combo_window -= 1
+                    if self.luban_combo_window == 0:
+                        self.luban_combo_stage = 0
+
+                if _skill_i_triggered(2):  # 大招
+                    self.luban_combo_stage = 1
+                    self.luban_combo_window = 40
+                elif _skill_i_triggered(0) and self.luban_combo_stage == 1:  # 1技能
+                    self.luban_combo_stage = 2
+                    self.luban_combo_window = 40
+                elif _skill_i_triggered(1) and self.luban_combo_stage == 2:  # 2技能
+                    self.luban_combo_count += 1
+                    reward_dict["luban_passive_combo"] = 1.0 * w.get("luban_passive_combo", 0)
+                    self.luban_combo_stage = 0
+                    self.luban_combo_window = 0
+                elif _skill_i_triggered(0) or _skill_i_triggered(1) or _skill_i_triggered(2):
+                    self.luban_combo_stage = 0
+                    self.luban_combo_window = 0
+
             # 狄仁杰大招命中判定
             if self.hero_config_id == 133 and len(skill_slots) > 2:
                 skill_2_triggered = (
@@ -549,4 +584,5 @@ class GameRewardManager:
             ),
             "dirj_skill2_use_count": self.dirj_skill2_use_count,
             "lane_arrival_frame": self.lane_arrival_frame,
+            "luban_combo_count": self.luban_combo_count,
         }
