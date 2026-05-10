@@ -112,15 +112,11 @@ class Agent(BaseAgent):
         return ratio + (1.0 - ratio) * cos_decay
 
     def init_config(self, config_data):
-        # Deterministic summoner skill selection based on both hero lineups
-        # 根据双方英雄阵容确定性选择召唤师技能
+        # 固定召唤师技能为狂暴 (80110)，简化训练
         my_heroes = config_data.get("my_heroes", [])
-        opponent_heroes = config_data.get("opponent_heroes", [])
         select_skills = {}
-        for i, hero_id in enumerate(my_heroes):
-            opp_id = opponent_heroes[i] if i < len(opponent_heroes) else 112
-            skill_id = MATCHUP_SKILL_MAP.get((hero_id, opp_id), 80115)
-            select_skills[hero_id] = skill_id
+        for hero_id in my_heroes:
+            select_skills[hero_id] = 80110  # 狂暴
         return select_skills
 
     def reset(self, observation):
