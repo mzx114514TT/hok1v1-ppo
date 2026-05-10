@@ -16,11 +16,14 @@ from agent_ppo.feature.feature_process.enhanced_features import (
     MoneyTracker,
     build_enhanced_features,
 )
+from agent_ppo.feature.cc_state_dict import Info, _camp_int
+from agent_ppo.feature.cc_obs_builder import ObsBuilder, DIM_ALL
 
 
 class FeatureProcess:
     def __init__(self, camp):
         self.camp = camp
+        self.camp_int = _camp_int(camp)
         self.hero_process = HeroProcess(camp)
         enemy_camp = "PLAYERCAMP_2" if camp == "PLAYERCAMP_1" else "PLAYERCAMP_1"
         self.enemy_hero_process = HeroProcess(enemy_camp)
@@ -28,9 +31,12 @@ class FeatureProcess:
         self.own_tower_process = OwnTowerProcess(camp)
         self.soldier_process = SoldierProcess(camp)
         self.money_tracker = MoneyTracker()
+        self.info = Info()
+        self.obs_builder = ObsBuilder()
 
     def reset(self, camp):
         self.camp = camp
+        self.camp_int = _camp_int(camp)
         self.hero_process = HeroProcess(camp)
         enemy_camp = "PLAYERCAMP_2" if camp == "PLAYERCAMP_1" else "PLAYERCAMP_1"
         self.enemy_hero_process = HeroProcess(enemy_camp)
@@ -38,6 +44,7 @@ class FeatureProcess:
         self.own_tower_process = OwnTowerProcess(camp)
         self.soldier_process = SoldierProcess(camp)
         self.money_tracker.reset()
+        self.obs_builder.reset()
 
     def process_organ_feature(self, frame_state):
         return self.organ_process.process_vec_organ(frame_state)
@@ -55,21 +62,7 @@ class FeatureProcess:
         return self.soldier_process.process_vec_soldier(frame_state)
 
     def process_feature(self, observation):
-        frame_state = observation["frame_state"]
-
-        main_camp_hero_vector_feature = self.process_hero_feature(frame_state)
-        enemy_camp_hero_vector_feature = self.process_enemy_hero_feature(frame_state)
-        organ_feature = self.process_organ_feature(frame_state)
-        own_tower_feature = self.process_own_tower_feature(frame_state)
-        soldier_feature = self.process_soldier_feature(frame_state)
-
-        base_feature = (
-            main_camp_hero_vector_feature
-            + enemy_camp_hero_vector_feature
-            + organ_feature
-            + own_tower_feature
-            + soldier_feature
-        )
-
-        enhanced = build_enhanced_features(frame_state, self.camp, self.money_tracker)
-        return base_feature + enhanced
+        # Use Info + ObsBuilder pipeline (wty-yy adapted, ~3578 dims)
+        self.info.update(observation)
+        feat = self.obs_builder.build_observation(self.info)
+        return feat.tolist()

@@ -63,8 +63,8 @@ FLASH_DISTANCE_THRESHOLD = 1500
 
 # Dimension configuration, used when building the model
 # 维度配置，构建模型时使用
-# 63 原有扁平特征 + 267 增强特征(位置one-hot/HP离散/CD离散/金币离散)
-FEATURE_DIM = 63 + 267  # 330
+# wty-yy 特征工程适配：Hero(580) + Soldiers(1360) + Organs(338) + Bullets(1300) = 3578
+FEATURE_DIM = 3578
 
 
 class DimConfig:
