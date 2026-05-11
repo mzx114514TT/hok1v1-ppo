@@ -44,10 +44,10 @@ class GameConfig:
     MODEL_SAVE_INTERVAL = 1800
 
     # ── Debug: 交互式调试 ───────────────────────────────────
-    debug_agent: bool = False  # True 时使用 DebugAgent 手动控制动作（替代模型推理）
+    debug_agent: bool = True  # True 时使用 DebugAgent 手动控制动作（替代模型推理）
 
     # ── Debug: 帧数据导出 ──────────────────────────────────
-    DEBUG_DUMP_FRAMES = False  # True 时保存每帧 observation 到 JSON
+    DEBUG_DUMP_FRAMES = True  # True 时保存每帧 observation 到 JSON
     DEBUG_DUMP_INTERVAL = 1000  # 每隔 N 帧保存一次
     DEBUG_DUMP_MAX_FRAMES = 10  # 每个 episode 最多保存帧数
     DEBUG_DUMP_EPISODES = None  # [1, 2] 只保存指定 episode，None=所有
@@ -74,8 +74,8 @@ FLASH_DISTANCE_THRESHOLD = 1500
 
 # Dimension configuration, used when building the model
 # 维度配置，构建模型时使用
-# wty-yy 特征工程适配：Hero(580) + Soldiers(1360) + Organs(338) + Bullets(1300) = 3578
-FEATURE_DIM = 3578
+# wty-yy 特征工程适配：Hero(580) + Soldiers(1360) + Organs(338) + Crab(167) + Bullets(1300) = 3745
+FEATURE_DIM = 3745
 
 
 class DimConfig:
@@ -144,13 +144,14 @@ class Config:
     # ── Entity Attention (from 齐梓桐 SCAN) ──────────────────
     ENTITY_DIM = 128          # per-entity encoding dimension
     NUM_ENTITY_HEADS = 4      # attention heads for entity self-attention
-    NUM_ENTITIES = 12         # self_hero + enemy_hero + 4 our_soldiers + 4 enemy_soldiers + our_tower + enemy_tower
+    NUM_ENTITIES = 13         # self_hero(0) + enemy_hero(1) + 4 our_soldiers(2-5) + 4 enemy_soldiers(6-9) + our_tower(10) + enemy_tower(11) + river_crab(12)
     ENTITY_SELF_HERO = 0
     ENTITY_ENEMY_HERO = 1
     ENTITY_OUR_SOLDIERS = (2, 6)
     ENTITY_ENEMY_SOLDIERS = (6, 10)
     ENTITY_OUR_TOWER = 10
     ENTITY_ENEMY_TOWER = 11
+    ENTITY_RIVER_CRAB = 12
 
     data_shapes = [
         [(FEATURE_DIM + 85) * 16],

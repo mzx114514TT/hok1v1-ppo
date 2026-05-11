@@ -138,7 +138,7 @@ class Model(nn.Module):
         self.num_entities = Cfg.NUM_ENTITIES     # 12
 
         # Per-entity-type projection MLPs: entity_slice → 256 → 128
-        from agent_ppo.feature.cc_obs_builder import DIM_HERO, DIM_SOLDIER, DIM_ORGAN
+        from agent_ppo.feature.cc_obs_builder import DIM_HERO, DIM_SOLDIER, DIM_ORGAN, DIM_RIVER_CRAB
         self.entity_proj_self_hero = nn.Sequential(
             make_fc_layer(DIM_HERO, 256), nn.ReLU(),
             make_fc_layer(256, self.entity_dim), nn.ReLU(),
@@ -155,8 +155,12 @@ class Model(nn.Module):
             make_fc_layer(DIM_ORGAN, 256), nn.ReLU(),
             make_fc_layer(256, self.entity_dim), nn.ReLU(),
         )
+        self.entity_proj_crab = nn.Sequential(
+            make_fc_layer(DIM_RIVER_CRAB, 256), nn.ReLU(),
+            make_fc_layer(256, self.entity_dim), nn.ReLU(),
+        )
 
-        # 2-layer TransformerEncoder: 12 tokens attend to each other
+        # 2-layer TransformerEncoder: 13 tokens attend to each other
         # with a sparse mask blocking same-side soldier internal attention
         enc_layer = nn.TransformerEncoderLayer(
             d_model=self.entity_dim, nhead=Cfg.NUM_ENTITY_HEADS,
@@ -182,6 +186,7 @@ class Model(nn.Module):
         self.tar_proj_hero = make_fc_layer(self.entity_dim, self.target_embed_dim)
         self.tar_proj_tower = make_fc_layer(self.entity_dim, self.target_embed_dim)
         self.tar_proj_soldier = make_fc_layer(self.entity_dim, self.target_embed_dim)
+        self.tar_proj_crab = make_fc_layer(self.entity_dim, self.target_embed_dim)
         self.tar_query = make_fc_layer(self.lstm_unit_size, self.target_embed_dim)
 
         # ── Value head ────────────────────────────────────────────
@@ -204,7 +209,7 @@ class Model(nn.Module):
         Returns: (B, 12, entity_dim) tensor.
         """
         from agent_ppo.feature.cc_obs_builder import (
-            DIM_HERO, DIM_SOLDIER, DIM_ORGAN, SOLDIER_MAX_NUM,
+            DIM_HERO, DIM_SOLDIER, DIM_ORGAN, DIM_RIVER_CRAB, SOLDIER_MAX_NUM,
         )
         S = SOLDIER_MAX_NUM  # 4
         tokens = []
@@ -227,7 +232,10 @@ class Model(nn.Module):
         off += DIM_ORGAN
         # enemy tower
         tokens.append(self.entity_proj_tower(feature_vec[:, off:off + DIM_ORGAN]))
-        return torch.stack(tokens, dim=1)  # (B, 12, entity_dim)
+        off += DIM_ORGAN
+        # river crab
+        tokens.append(self.entity_proj_crab(feature_vec[:, off:off + DIM_RIVER_CRAB]))
+        return torch.stack(tokens, dim=1)  # (B, 13, entity_dim)
 
     # ---- Forward pass ----
 
@@ -334,11 +342,13 @@ class Model(nn.Module):
         E_HERO = Cfg.ENTITY_ENEMY_HERO        # 1
         E_SOL = Cfg.ENTITY_ENEMY_SOLDIERS      # (6, 10)
         E_TOWER = Cfg.ENTITY_ENEMY_TOWER       # 11
+        E_CRAB = Cfg.ENTITY_RIVER_CRAB         # 12
 
         # Project entity tokens to target embedding space (64-dim)
         hero_emb = self.tar_proj_hero(entity_tokens[:, E_HERO, :])
         tower_emb = self.tar_proj_tower(entity_tokens[:, E_TOWER, :])
         soldier_embs = self.tar_proj_soldier(entity_tokens[:, E_SOL[0]:E_SOL[1], :])
+        crab_emb = self.tar_proj_crab(entity_tokens[:, E_CRAB, :])
 
         # Stack 9 target candidates: pad slots use fixed small embedding
         pad_emb = torch.full_like(hero_emb, 0.1)
@@ -350,7 +360,7 @@ class Model(nn.Module):
             soldier_embs[:, 1, :],      # 4: enemy soldier 1
             soldier_embs[:, 2, :],      # 5: enemy soldier 2
             soldier_embs[:, 3, :],      # 6: enemy soldier 3
-            pad_emb,                    # 7: crab (unused in CC map)
+            crab_emb,                   # 7: river crab
             pad_emb,                    # 8: padding
         ], dim=1)  # (B, 9, 64)
 
@@ -621,10 +631,11 @@ def _build_entity_sparse_mask():
       - enemy soldiers (6-9) don't attend to each other
     All other pairs are allowed (can cross-attend between camps/types).
     """
-    N = 12
+    N = 13
     mask = torch.zeros(N, N)
-    mask[2:6, 2:6] = float('-inf')
-    mask[6:10, 6:10] = float('-inf')
+    mask[2:6, 2:6] = float('-inf')   # our soldiers internal
+    mask[6:10, 6:10] = float('-inf')  # enemy soldiers internal
+    # crab (12) can freely attend to/be attended by all entities
     return mask
 
 

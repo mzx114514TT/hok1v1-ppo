@@ -168,6 +168,10 @@ DIM_SOLDIER = (
 # Organ tower encoding: DIM_UNIT + target_type(5) + cake_flags(2)
 DIM_ORGAN = DIM_UNIT + 5 + 2  # 162+5+2 = 169
 
+# River crab encoding: DIM_UNIT + behave(5)
+RIVER_CRAB_BEHAVES = ["State_Dead", "State_Auto", "State_Revive", "State_Born"]
+DIM_RIVER_CRAB = DIM_UNIT + len(RIVER_CRAB_BEHAVES) + 1  # 162+5 = 167
+
 # Bullet encoding: slot_type(5) + position(125)
 DIM_BULLET = len(BULLET_SLOTS) + DIM_POSITION  # 5+125 = 130
 
@@ -177,8 +181,9 @@ DIM_ALL_SOLDIERS = DIM_SOLDIER * SOLDIER_MAX_NUM * 2  # 1360
 DIM_ALL_ORGANS = DIM_ORGAN * 2  # 338
 DIM_ALL_BULLETS = DIM_BULLET * BULLET_MAX_NUM  # 1300
 
-DIM_ALL = DIM_ALL_HEROES + DIM_ALL_SOLDIERS + DIM_ALL_ORGANS + DIM_ALL_BULLETS
-# = 580 + 1360 + 338 + 1300 = 3578
+# Total feature dimensions
+DIM_ALL = DIM_ALL_HEROES + DIM_ALL_SOLDIERS + DIM_ALL_ORGANS + DIM_RIVER_CRAB + DIM_ALL_BULLETS
+# = 580 + 1360 + 338 + 167 + 1300 = 3745
 
 
 class ObsBuilder:
@@ -364,6 +369,16 @@ class ObsBuilder:
         x_soldiers += [0.0] * (DIM_SOLDIER * SOLDIER_MAX_NUM - len(x_soldiers))
         return x_soldiers, mask
 
+    def process_river_crab(self, crab: ActorInfo) -> list:
+        if crab is None:
+            return [0.0] * DIM_RIVER_CRAB
+        x_behave = [0.0] * (len(RIVER_CRAB_BEHAVES) + 1)
+        idx = len(RIVER_CRAB_BEHAVES)  # unknown/other
+        if crab.behave in RIVER_CRAB_BEHAVES:
+            idx = RIVER_CRAB_BEHAVES.index(crab.behave)
+        x_behave[idx] = 1.0
+        return x_behave + self.process_unit(crab)
+
     def process_organ(self, sub_tower, cake, is_enemy: bool) -> list:
         if sub_tower is None:
             return [0.0] * DIM_ORGAN
@@ -441,6 +456,9 @@ class ObsBuilder:
         x_organ_our = self.process_organ(info.organ_our.sub_tower, info.cake_our, False)
         x_organ_enemy = self.process_organ(info.organ_enemy.sub_tower, info.cake_enemy, True)
 
+        # River crab
+        x_river_crab = self.process_river_crab(info.river_crab)
+
         # Bullets
         x_bullet, _ = self.process_bullets()
 
@@ -448,6 +466,7 @@ class ObsBuilder:
             x_hero_our + x_hero_enemy
             + x_soldier_our + x_soldier_enemy
             + x_organ_our + x_organ_enemy
+            + x_river_crab
             + x_bullet,
             np.float32,
         )
@@ -464,6 +483,7 @@ OBS_DIMS = {
     "DIM_HERO": DIM_HERO,
     "DIM_SOLDIER": DIM_SOLDIER,
     "DIM_ORGAN": DIM_ORGAN,
+    "DIM_RIVER_CRAB": DIM_RIVER_CRAB,
     "DIM_BULLET": DIM_BULLET,
     "DIM_ALL": DIM_ALL,
 }
