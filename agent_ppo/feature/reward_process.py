@@ -118,6 +118,12 @@ class GameRewardManager:
         self.prev_enemy_cake_pos = None  # 上一帧敌方血包位置
         self.safe_cake_eat_count = 0
 
+        # Matchup 开局引导追踪
+        self.enemy_config_id = 0
+        self.prev_dist_to_enemy = None  # 上一帧到敌方英雄距离
+        self.prev_dist_to_my_tower = None  # 上一帧到己方塔距离
+        self.my_tower_pos = None  # 己方塔位置（固定，开局计算一次）
+
     def _hero_by_camp(self, frame_data, camp):
         for h in frame_data["hero_states"]:
             if h["camp"] == camp:
@@ -250,10 +256,16 @@ class GameRewardManager:
         reward_dict["lane_arrival"] = 0.0
         reward_dict["early_aggression_penalty"] = 0.0
         reward_dict["safe_cake_eat"] = 0.0
+        reward_dict["aggressive_forward"] = 0.0
+        reward_dict["stay_near_tower"] = 0.0
+        reward_dict["mirror_farm_bonus"] = 0.0
+        reward_dict["avoid_enemy_hero"] = 0.0
 
-        # 获取英雄 config_id
+        # 获取英雄 config_id + 敌方 config_id
         if main_hero is not None:
             self.hero_config_id = main_hero.get("config_id", self.hero_config_id)
+        if enemy_hero is not None:
+            self.enemy_config_id = enemy_hero.get("config_id", self.enemy_config_id)
 
         # ── 死亡原因推断 ────────────────────────────────────
         if d_main_dead > 0 and main_hero is not None and enemy_camp is not None:
@@ -666,6 +678,78 @@ class GameRewardManager:
             if self.frames_since_action > 90:
                 reward_dict["idle_penalty"] = -0.05 * w.get("idle_penalty", 0)
                 self.idle_frames += 1
+
+        # ── Matchup 开局引导（前 2000 帧）───────────────────
+        if main_hero is not None and enemy_hero is not None and self.last_frame_no < 2000:
+            matchup = (self.hero_config_id, self.enemy_config_id)
+            hero_pos_g = (main_hero.get("location", {}).get("x", 0),
+                         main_hero.get("location", {}).get("z", 0))
+            e_loc = enemy_hero.get("location", {})
+            enemy_pos_g = (e_loc.get("x", 100000), e_loc.get("z", 100000))
+            enemy_visible = enemy_pos_g[0] != 100000
+
+            # 己方塔位置（缓存，只算一次）
+            if self.my_tower_pos is None:
+                for npc in frame_data.get("npc_states", []):
+                    if npc.get("sub_type") == 21 and npc.get("camp") == main_camp:
+                        tloc = npc.get("location", {})
+                        self.my_tower_pos = (tloc.get("x", 0), tloc.get("z", 0))
+                        break
+
+            # 距离衰减系数：权重在 2000 帧内线性衰减到 0
+            fade = max(0.0, 1.0 - self.last_frame_no / 2000.0)
+
+            if matchup in ((112, 112), (133, 133)):  # mirror: 清线优先
+                if d_hurt_hero > 0 and cur["main_level"] <= 2:
+                    reward_dict["mirror_farm_bonus"] = _clip(-0.05 * fade) * w.get("mirror_farm_bonus", 0)
+                if minion_attacked:
+                    reward_dict["mirror_farm_bonus"] += _clip(0.05 * fade) * w.get("mirror_farm_bonus", 0)
+
+            elif matchup == (112, 133):  # 鲁班打狄仁杰: 主动换血
+                if enemy_visible and self.prev_dist_to_enemy is not None:
+                    cur_d = math.dist(hero_pos_g, enemy_pos_g)
+                    delta = self.prev_dist_to_enemy - cur_d  # 正=靠近
+                    reward_dict["aggressive_forward"] = _clip(delta / 300.0 * fade) * w.get("aggressive_forward", 0)
+                self.prev_dist_to_enemy = math.dist(hero_pos_g, enemy_pos_g) if enemy_visible else None
+
+            elif matchup == (133, 112):  # 狄仁杰打鲁班: 塔前防守+绕开敌方清线
+                if self.my_tower_pos is not None:
+                    d_tower = math.dist(hero_pos_g, self.my_tower_pos)
+                    if self.last_frame_no < 1000 and d_tower < 2000 and cur["main_hp_rate"] > 0.8:
+                        reward_dict["stay_near_tower"] = _clip(0.03 * fade) * w.get("stay_near_tower", 0)
+                    if self.last_frame_no >= 1000:
+                        if enemy_visible:
+                            d_enemy = math.dist(hero_pos_g, enemy_pos_g)
+                            if d_enemy > 5000:
+                                reward_dict["avoid_enemy_hero"] = _clip(0.03 * fade) * w.get("avoid_enemy_hero", 0)
+                            elif d_enemy < 3000:
+                                reward_dict["avoid_enemy_hero"] = _clip(-0.03 * fade) * w.get("avoid_enemy_hero", 0)
+
+        # ── 残血撤退引导（全局）─────────────────────────────
+        if main_hero is not None and enemy_hero is not None:
+            hp_rate_r = cur["main_hp_rate"]
+            enemy_alive = enemy_hero.get("hp", 0) > 0
+            e_loc_r = enemy_hero.get("location", {})
+            enemy_r_visible = e_loc_r.get("x", 100000) != 100000
+            enemy_hp_rate_r = cur["enemy_hp_rate"]
+
+            should_retreat = (
+                hp_rate_r < 0.35
+                and enemy_alive
+                and enemy_r_visible
+                and enemy_hp_rate_r > hp_rate_r * 1.3
+            )
+
+            if should_retreat and self.my_tower_pos is not None:
+                hero_pos_r = (main_hero.get("location", {}).get("x", 0),
+                             main_hero.get("location", {}).get("z", 0))
+                cur_d_tower = math.dist(hero_pos_r, self.my_tower_pos)
+                if self.prev_dist_to_my_tower is not None:
+                    delta_t = self.prev_dist_to_my_tower - cur_d_tower
+                    reward_dict["retreat_smart"] = _clip(delta_t / 300.0) * 0.3 * w.get("retreat_smart", 0)
+                self.prev_dist_to_my_tower = cur_d_tower
+            else:
+                self.prev_dist_to_my_tower = None
 
         # ── 更新持久化状态 ──────────────────────────────────
         if main_hero is not None:

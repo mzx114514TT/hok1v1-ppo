@@ -24,12 +24,12 @@ class GameConfig:
         "forward": 0.5,          # 保留前进引导
         # 以下推断类奖励权重清零（BUTTON_INDEX/距离阈值未校准，易发错信号）
         "level_diff": 0.0,
-        "minion_attack": 0.0,
+        "minion_attack": 0.5,  # 攻击小兵奖励（mirror开局引导）
         "monster_attack": 0.0,
         "heal_smart": 0.0,
         "flash_smart": 0.0,
         "tower_dive_penalty": 0.0,
-        "retreat_smart": 0.0,
+        "retreat_smart": 0.5,  # 残血撤退引导（走向己方塔）
         "idle_penalty": 0.0,
         "luban_passive_combo": 1.0,  # 鲁班连招: 大招→1技能→2技能
         "luban_skill_0_clear": 0.0,
@@ -39,6 +39,11 @@ class GameConfig:
         "lane_arrival": 0.0,
         "early_aggression_penalty": 0.0,
         "safe_cake_eat": 2.0,  # 安全吃敌方塔后血包（己方小兵扛塔+敌方英雄阵亡/视野外）
+        # ── Matchup 开局引导（权重在 2000 帧内线性衰减）───
+        "aggressive_forward": 0.15,   # (112,133) 鲁班主动靠近敌方英雄
+        "stay_near_tower": 0.1,       # (133,112) 狄仁杰塔前待机
+        "mirror_farm_bonus": 0.1,     # mirror 对局清线奖励
+        "avoid_enemy_hero": 0.1,      # (133,112) 狄仁杰绕开敌方英雄
     }
     TIME_SCALE_ARG = 0
     DUAL_CLIP_C = 3.0  # Dual-clip PPO 下界常数（AAAI 2020 论文值）
