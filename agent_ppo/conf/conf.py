@@ -38,6 +38,7 @@ class GameConfig:
         "dirj_skill_2_miss": 0.0,
         "lane_arrival": 0.0,
         "early_aggression_penalty": 0.0,
+        "safe_cake_eat": 2.0,  # 安全吃敌方塔后血包（己方小兵扛塔+敌方英雄阵亡/视野外）
     }
     TIME_SCALE_ARG = 0
     DUAL_CLIP_C = 3.0  # Dual-clip PPO 下界常数（AAAI 2020 论文值）

@@ -114,6 +114,10 @@ class GameRewardManager:
         self.luban_combo_window = 0
         self.luban_combo_count = 0
 
+        # 敌方血包安全吃掉追踪（仅己方小兵扛塔且敌方英雄阵亡/视野外时）
+        self.prev_enemy_cake_pos = None  # 上一帧敌方血包位置
+        self.safe_cake_eat_count = 0
+
     def _hero_by_camp(self, frame_data, camp):
         for h in frame_data["hero_states"]:
             if h["camp"] == camp:
@@ -245,6 +249,7 @@ class GameRewardManager:
         reward_dict["dirj_cleanse_reward"] = 0.0
         reward_dict["lane_arrival"] = 0.0
         reward_dict["early_aggression_penalty"] = 0.0
+        reward_dict["safe_cake_eat"] = 0.0
 
         # 获取英雄 config_id
         if main_hero is not None:
@@ -553,6 +558,92 @@ class GameRewardManager:
                 delta = prev_dist_to_mid - dist_to_mid
                 reward_dict["lane_arrival"] = _clip(delta / 1000.0) * 0.3 * w.get("lane_arrival", 0)
 
+        # ── 安全吃敌方塔后血包 ──────────────────────────────
+        # 条件：敌方血包本帧消失 + 英雄在血包位置附近 + 敌方英雄阵亡或视野外
+        #       + 己方小兵在敌方塔附近扛塔 + 主英雄未被敌方塔选为攻击目标
+        cur_enemy_cake_pos = None
+        for cake in frame_data.get("cakes", []) or []:
+            collider = cake.get("collider", {}) if isinstance(cake, dict) else {}
+            loc = collider.get("location", {}) if isinstance(collider, dict) else {}
+            cx = loc.get("x", 0) if isinstance(loc, dict) else 0
+            cz = loc.get("z", 0) if isinstance(loc, dict) else 0
+            # 敌方血包启发式：位置 x 符号与敌方塔一致（主阵营 0→蓝方塔在-5000侧，敌方=红方=+5000侧）
+            # 简化：只要不是己方血包就当敌方，用距离敌塔近做判定
+            # 这里先记录所有血包，下面用位置匹配判定归属
+            if cx == 0 and cz == 0:
+                continue
+            # 判定是否是敌方血包：距离敌方塔的距离 < 距离己方塔的距离
+            e_tower_pos, m_tower_pos = None, None
+            for npc in frame_data.get("npc_states", []):
+                if npc.get("sub_type") == 21:
+                    nloc = npc.get("location", {})
+                    npos = (nloc.get("x", 0), nloc.get("z", 0))
+                    if npc.get("camp") == enemy_camp:
+                        e_tower_pos = npos
+                    elif npc.get("camp") == main_camp:
+                        m_tower_pos = npos
+            if e_tower_pos is None:
+                continue
+            cake_pos = (cx, cz)
+            d_to_etower = math.dist(cake_pos, e_tower_pos)
+            d_to_mtower = math.dist(cake_pos, m_tower_pos) if m_tower_pos else float("inf")
+            if d_to_etower < d_to_mtower:
+                cur_enemy_cake_pos = cake_pos
+                break
+
+        # 检测"敌方血包消失"事件：上一帧有，这一帧没了
+        if (self.prev_enemy_cake_pos is not None and cur_enemy_cake_pos is None
+                and main_hero is not None and enemy_camp is not None):
+            hero_loc = main_hero.get("location", {})
+            hero_pos_c = (hero_loc.get("x", 0), hero_loc.get("z", 0))
+            dist_to_cake = math.dist(hero_pos_c, self.prev_enemy_cake_pos)
+            # 条件1：主英雄在血包位置附近(消失时)
+            near_cake = dist_to_cake < 1500
+
+            # 条件2：敌方英雄阵亡或不在视野内
+            enemy_dead_or_unseen = True
+            if enemy_hero is not None:
+                en_hp = enemy_hero.get("hp", 0)
+                en_loc = enemy_hero.get("location", {})
+                en_x = en_loc.get("x", 100000)
+                if en_hp > 0 and en_x != 100000:  # 敌方活着且可见
+                    # 敌方英雄距主英雄 < 视野阈值(8000)视为可见威胁
+                    if math.dist(hero_pos_c, (en_x, en_loc.get("z", 0))) < 8000:
+                        enemy_dead_or_unseen = False
+
+            # 条件3：己方小兵在敌方塔附近扛塔
+            minion_tanking = False
+            e_tower_pos_chk = None
+            for npc in frame_data.get("npc_states", []):
+                if npc.get("sub_type") == 21 and npc.get("camp") == enemy_camp:
+                    tloc = npc.get("location", {})
+                    e_tower_pos_chk = (tloc.get("x", 0), tloc.get("z", 0))
+                    break
+            if e_tower_pos_chk is not None:
+                for npc in frame_data.get("npc_states", []):
+                    if npc.get("camp") == main_camp and npc.get("hp", 0) > 0:
+                        mhp = npc.get("max_hp", 0)
+                        if MINION_MAX_HP_RANGE[0] <= mhp <= MINION_MAX_HP_RANGE[1]:
+                            nloc = npc.get("location", {})
+                            npos_m = (nloc.get("x", 0), nloc.get("z", 0))
+                            if math.dist(npos_m, e_tower_pos_chk) < TOWER_ATTACK_RANGE:
+                                minion_tanking = True
+                                break
+
+            # 条件4：主英雄不是敌方塔的攻击目标
+            not_tower_target = True
+            for npc in frame_data.get("npc_states", []):
+                if npc.get("sub_type") == 21 and npc.get("camp") == enemy_camp:
+                    if npc.get("attack_target", 0) == main_hero.get("runtime_id", -1):
+                        not_tower_target = False
+                    break
+
+            if near_cake and enemy_dead_or_unseen and minion_tanking and not_tower_target:
+                self.safe_cake_eat_count += 1
+                reward_dict["safe_cake_eat"] = 1.0 * w.get("safe_cake_eat", 0)
+
+        self.prev_enemy_cake_pos = cur_enemy_cake_pos
+
         # ── 空闲惩罚 ────────────────────────────────────────
         if main_hero is not None:
             hero_loc = main_hero.get("location", {})
@@ -628,4 +719,5 @@ class GameRewardManager:
             "dirj_cleanse_count": self.dirj_cleanse_count,
             "lane_arrival_frame": self.lane_arrival_frame,
             "luban_combo_count": self.luban_combo_count,
+            "safe_cake_eat_count": self.safe_cake_eat_count,
         }
