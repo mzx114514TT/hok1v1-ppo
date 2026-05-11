@@ -1,12 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: UTF-8 -*-
-"""Observation builder adapted from wty-yy's obs_builder for CC 2026 protocol.
+"""Observation builder — 3578-dim flat feature vector from typed entity encoding.
+================================================================================
 
-Encoding: position one-hot + HP discretization + skill CD discretization
-+ money delta discretization + buff/mark flat count. Grouped by unit type
-and concatenated into a single flat feature vector.
+Adapted from wty-yy's obs_builder for CC 2026 protocol (112 鲁班 / 133 狄仁杰).
 
-Dimensions are computed in build_obs_dims() and stored as OBS_DIMS.
+Encoding per unit:  position one-hot (125) + HP discretization (27) + Buff/Mark
+flat count (10) = 162-dim base.  Each unit type adds its own header features
+(behav mode, skill CD, money, etc.) for a type-specific total.
+
+Feature vector layout (offsets in the 3578-dim output):
+  ┌──────────────┬──────────┬──────────────────────────────────────────┐
+  │ offset       │ dims     │ content                                  │
+  ├──────────────┼──────────┼──────────────────────────────────────────┤
+  │ 0-289        │ 290      │ self_hero  (DIM_HERO)                   │
+  │ 290-579      │ 290      │ enemy_hero (DIM_HERO)                   │
+  │ 580-1259     │ 170×4    │ our_soldiers ×4  (DIM_SOLDIER each)    │
+  │ 1260-1939    │ 170×4    │ enemy_soldiers ×4                       │
+  │ 1940-2108    │ 169      │ our_tower   (DIM_ORGAN)                 │
+  │ 2109-2277    │ 169      │ enemy_tower (DIM_ORGAN)                 │
+  │ 2278-3577    │ 130×10   │ bullets ×10  (DIM_BULLET each)          │
+  │              ├──────────┼──────────────────────────────────────────┤
+  │              │ 3578     │ DIM_ALL                                  │
+  └──────────────┴──────────┴──────────────────────────────────────────┘
+
+Dimension constants are exported at module level for use by model.py
+(entity attention extracts tokens from known feature vector gaps).
+
+Key design decision:  Buff/Mark encoding uses flat count bins (0-4 capped)
+instead of per-ID one-hot vectors because the CC 2026 buff/mark config IDs
+for 鲁班/狄仁杰 are not yet calibrated.  Run debug_agent to collect IDs,
+then replace flat counts with per-ID encodings.
 """
 
 import math

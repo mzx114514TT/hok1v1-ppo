@@ -6,14 +6,35 @@
 """
 Author: Tencent AI Arena Authors
 
-22 项奖励系统 — 从齐梓桐模型移植
-  基础 12 项:death_penalty / hp_diff / last_hit / money_diff / exp_diff /
-             level_diff / hurt_to_hero / hurt_to_tower / tower_hp_diff /
-             kill_hero / destroy_tower / forward
-  生存发育 7 项:minion_attack / monster_attack / heal_smart / flash_smart /
-               tower_dive_penalty / retreat_smart / idle_penalty
-  英雄特化 5 项:luban_skill_0_clear / dirj_skill_2_hit /
-               dirj_skill_2_miss / lane_arrival / early_aggression_penalty
+Reward system — 8 active core items + 2 hero-specific bonuses.
+========================================================================
+
+Active rewards (non-zero weight in conf.py):
+  death_penalty (1.0)    — -1.0 per death, cause classified by proximity to tower
+  hp_diff       (2.0)    — clipped delta between hero HP rates (zero-sum)
+  last_hit      (0.5)    — 0.5 per last-hit, inferred from NPC distance comparison
+  money_diff    (0.006)  — clipped delta/1000 (AAAI paper: minimal farming signal)
+  exp_diff      (0.006)  — clipped delta/1000
+  hurt_to_hero  (2.0)    — clipped damage/enemy_max_hp
+  hurt_to_tower (3.0)    — clipped damage/10000
+  tower_hp_diff (10.0)   — zero-sum tower HP rate delta (highest weight: pushing wins)
+  kill_hero     (5.0)    — 1.0 per kill
+  destroy_tower (10.0)   — binary flag when enemy tower destroyed
+  forward       (0.5)    — frame-differential distance-to-enemy-tower / 300
+  ── Hero-specific ───────────────────────────────────────────────────────
+  luban_passive_combo (1.0) — 鲁班 burst: ult→skill1→skill2 within 40f window
+  dirj_cleanse_reward (0.5) — 狄仁杰 skill2 used while debuffed (active marks)
+
+Detection mechanisms:
+  - Skill usage:    CD transition from 0→positive (reliable, no button index needed)
+  - Last-hit:       NPC HP tracking + distance comparison (main < enemy → last-hit)
+  - Death cause:    hero_death within TOWER_ATTACK_RANGE*2 of enemy tower → tower kill
+  - Tower dive:     taking damage while in enemy tower attack range
+  - Heal/flash:     HP jump (>5% hp_rate) / position jump (>FLASH_DISTANCE_THRESHOLD)
+                    when summoner skill CD transitions
+
+Reward clipping:  individual values clipped to [-5, 5] before × weight.
+No time decay (TIME_SCALE_ARG=0).
 """
 
 import math

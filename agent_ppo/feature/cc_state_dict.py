@@ -1,12 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: UTF-8 -*-
-"""Adapted Info/ActorInfo/HeroInfo classes for CC 2026 protocol.
+"""Protocol adaptation — wraps raw env observation dicts into typed Info objects.
 
-Based on wty-yy's unpack_state_dict.py, adapted for CC field names:
-- camp: tried as int (1=blue,2=red), fallback to string ("PLAYERCAMP_1")
-- actor_type/sub_type: int (CC protocol), with enum string fallback
-- Hero uses snake_case for kill/death/total_hurt fields
-- Skill uses skill_slot_list (old) or skill_state.slot_states (new)
+================================================================================
+The Kaiwu env returns Python dicts whose field names may differ between protocol
+versions (e.g. old baseline uses `skill_slot_list` / `cool_down`, new protocol
+uses `skill_state.slot_states` / `cooldown`).  This module provides:
+
+  _sf(dict, *candidate_keys)  — safe-first accessor: returns the first non-None
+                                value for any of the candidate key names.
+  _type_str / _sub_str / _camp_int / _behave_str  — type converters that
+                                handle both int enum and string formats.
+
+  Info / HeroInfo / ActorInfo / SkillInfo / SlotInfo / OrganInfo /
+  SoldierInfo / BulletInfo / BuffInfo / CakeInfo / BulletsInfo —
+                                typed wrappers with consistent attribute names,
+                                used by ObsBuilder and DebugAgent.
+
+Key compatibility mappings:
+  old field name        →  new protocol name      →  cc_state_dict attribute
+  ─────────────────────────────────────────────────────────────────
+  skill_slot_list       skill_state.slot_states    SkillInfo(slots)
+  cool_down / max_cd    cooldown / cooldown_max    SlotInfo.cd / .cd_max
+  enable / can_cast     usable                    SlotInfo.usable
+  kill_count            kill_cnt                  HeroInfo.kill_cnt
+  mp / max_mp           ep / max_ep               ActorInfo.ep / .ep_max
+  camp (string)         camp (int 1=blue,2=red)   ActorInfo.camp (int 0/1)
+  actor_type (string)   actor_type (int)          ActorInfo.type (list[str])
+  UNSEEN_PADDING        UNSEEN_PADDING            position=[100000, 100000]
+================================================================================
 """
 
 import math
