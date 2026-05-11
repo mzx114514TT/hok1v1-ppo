@@ -34,6 +34,7 @@ class GameConfig:
         "luban_passive_combo": 1.0,  # 鲁班连招: 大招→1技能→2技能
         "luban_skill_0_clear": 0.0,
         "dirj_skill_2_hit": 0.0,
+        "dirj_cleanse_reward": 0.5,  # 狄仁杰二技能解控
         "dirj_skill_2_miss": 0.0,
         "lane_arrival": 0.0,
         "early_aggression_penalty": 0.0,

@@ -84,6 +84,7 @@ class GameRewardManager:
         self.skill2_ref_hp = 0.0
         self.dirj_skill2_use_count = 0
         self.dirj_skill2_hit_count = 0
+        self.dirj_cleanse_count = 0
         self.lane_arrival_done = False
         self.lane_arrival_frame = 0
 
@@ -220,6 +221,7 @@ class GameRewardManager:
         reward_dict["luban_skill_0_clear"] = 0.0
         reward_dict["dirj_skill_2_hit"] = 0.0
         reward_dict["dirj_skill_2_miss"] = 0.0
+        reward_dict["dirj_cleanse_reward"] = 0.0
         reward_dict["lane_arrival"] = 0.0
         reward_dict["early_aggression_penalty"] = 0.0
 
@@ -494,6 +496,25 @@ class GameRewardManager:
                 elif self.skill2_check_window == 0:
                     reward_dict["dirj_skill_2_miss"] = _clip(-0.3) * w.get("dirj_skill_2_miss", 0)
 
+            # 狄仁杰二技能解控 (skill_slots[1] = 二技能)
+            if self.hero_config_id == 133 and len(skill_slots) > 1:
+                _debuffed = False
+                _bs = main_hero.get("buff_state", {})
+                if isinstance(_bs, dict):
+                    for _m in _bs.get("buff_marks", []):
+                        if isinstance(_m, dict) and _m.get("layer", 0) > 0:
+                            _debuffed = True
+                            break
+                if _debuffed:
+                    _cleanse_triggered = (
+                        len(prev_skill_cd_snapshot) > 1
+                        and prev_skill_cd_snapshot[1] == 0
+                        and skill_slots[1].get("cool_down", 0) > 0
+                    )
+                    if _cleanse_triggered:
+                        self.dirj_cleanse_count += 1
+                        reward_dict["dirj_cleanse_reward"] = 0.5 * w.get("dirj_cleanse_reward", 0)
+
         # ── 批次3:1级阶段清线优先 ──────────────────────────
         if cur["main_level"] == 1 and d_hurt_hero > 0:
             reward_dict["early_aggression_penalty"] = _clip(-0.1) * w.get("early_aggression_penalty", 0)
@@ -583,6 +604,7 @@ class GameRewardManager:
                 self.dirj_skill2_hit_count / max(self.dirj_skill2_use_count, 1), 3
             ),
             "dirj_skill2_use_count": self.dirj_skill2_use_count,
+            "dirj_cleanse_count": self.dirj_cleanse_count,
             "lane_arrival_frame": self.lane_arrival_frame,
             "luban_combo_count": self.luban_combo_count,
         }
