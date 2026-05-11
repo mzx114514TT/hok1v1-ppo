@@ -43,6 +43,9 @@ class GameConfig:
     DUAL_CLIP_C = 3.0  # Dual-clip PPO 下界常数（AAAI 2020 论文值）
     MODEL_SAVE_INTERVAL = 1800
 
+    # ── Debug: 交互式调试 ───────────────────────────────────
+    debug_agent: bool = False  # True 时使用 DebugAgent 手动控制动作（替代模型推理）
+
     # ── Debug: 帧数据导出 ──────────────────────────────────
     DEBUG_DUMP_FRAMES = False  # True 时保存每帧 observation 到 JSON
     DEBUG_DUMP_INTERVAL = 1000  # 每隔 N 帧保存一次

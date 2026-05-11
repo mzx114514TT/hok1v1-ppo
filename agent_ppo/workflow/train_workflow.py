@@ -174,6 +174,11 @@ class EpisodeRunner:
                 from agent_ppo.debug.frame_dumper import get_dumper
                 dumper = get_dumper()
                 dumper.reset_episode(self.episode_cnt)
+            debug_agents = None
+            if getattr(GameConfig, "debug_agent", False):
+                from agent_ppo.debug.debug_agent import DebugAgent
+                from agent_ppo.feature.cc_state_dict import Info
+                debug_agents = [DebugAgent() for _ in range(self.agent_num)]
             self.logger.info(f"Episode {self.episode_cnt} start, usr_conf is {usr_conf}")
 
             # Reward initialization
@@ -196,7 +201,11 @@ class EpisodeRunner:
                     zip(self.do_predicts, self.do_samples, self.agents)
                 ):
                     if do_predict:
-                        if not is_eval:
+                        if debug_agents is not None:
+                            from agent_ppo.feature.cc_state_dict import Info
+                            info = Info(observation[str(index)])
+                            actions[index] = debug_agents[index].act(info)
+                        elif not is_eval:
                             actions[index] = agent.predict(observation[str(index)])
                         else:
                             actions[index] = agent.exploit(observation[str(index)])
