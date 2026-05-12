@@ -92,7 +92,7 @@ class DimConfig:
 # 模型和算法使用的相关配置
 class Config:
     NETWORK_NAME = "network"
-    LSTM_TIME_STEPS = 16
+    LSTM_TIME_STEPS = 32  # 32-frame rollout (longer gradient horizon for MOBA delayed rewards)
     LSTM_UNIT_SIZE = 512
     DATA_SPLIT_SHAPE = [
         FEATURE_DIM + 85,
@@ -125,7 +125,7 @@ class Config:
     TARGET_LR = 1e-5
     TARGET_STEP = 5000
     WARMUP_STEPS = 500
-    PPO_EPOCHS = 3
+    PPO_EPOCHS = 6  # 每批样本重复训练 6 轮（提高样本利用率）
     WEIGHT_DECAY = 1e-4
     BETA_START = 0.1
     BC_WARMUP_STEPS = 200
@@ -160,30 +160,30 @@ class Config:
     ENTITY_RIVER_CRAB = 12
 
     data_shapes = [
-        [(FEATURE_DIM + 85) * 16],
-        [16],
-        [16],
-        [16],
-        [16],
-        [16],
-        [16],
-        [16],
-        [16],
-        [192],
-        [256],
-        [256],
-        [256],
-        [256],
-        [144],
-        [16],
-        [16],
-        [16],
-        [16],
-        [16],
-        [16],
-        [16],
-        [512],
-        [512],
+        [(FEATURE_DIM + 85) * LSTM_TIME_STEPS],
+        [LSTM_TIME_STEPS],
+        [LSTM_TIME_STEPS],
+        [LSTM_TIME_STEPS],
+        [LSTM_TIME_STEPS],
+        [LSTM_TIME_STEPS],
+        [LSTM_TIME_STEPS],
+        [LSTM_TIME_STEPS],
+        [LSTM_TIME_STEPS],
+        [LABEL_SIZE_LIST[0] * LSTM_TIME_STEPS],
+        [LABEL_SIZE_LIST[1] * LSTM_TIME_STEPS],
+        [LABEL_SIZE_LIST[2] * LSTM_TIME_STEPS],
+        [LABEL_SIZE_LIST[3] * LSTM_TIME_STEPS],
+        [LABEL_SIZE_LIST[4] * LSTM_TIME_STEPS],
+        [LABEL_SIZE_LIST[5] * LSTM_TIME_STEPS],
+        [LSTM_TIME_STEPS],
+        [LSTM_TIME_STEPS],
+        [LSTM_TIME_STEPS],
+        [LSTM_TIME_STEPS],
+        [LSTM_TIME_STEPS],
+        [LSTM_TIME_STEPS],
+        [LSTM_TIME_STEPS],
+        [LSTM_UNIT_SIZE],
+        [LSTM_UNIT_SIZE],
     ]
 
     LEGAL_ACTION_SIZE_LIST = LABEL_SIZE_LIST.copy()
